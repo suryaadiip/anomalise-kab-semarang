@@ -106,7 +106,15 @@ export default function DashboardKantor() {
       const { data, error } = await supabaseData
         .from('view_rekap_agregat_kantor')
         .select('*')
+
+        // Urutan dibuat stabil untuk pagination
         .order('tanggal_snapshot', { ascending: false })
+        .order('kdkec', { ascending: true })
+        .order('idsubsls', { ascending: true })
+        .order('pml_email', { ascending: true })
+        .order('kode_anomali', { ascending: true })
+        .order('tipe_masalah', { ascending: true })
+
         .range(from, from + pageSize - 1);
 
       if (error) {
@@ -124,6 +132,8 @@ export default function DashboardKantor() {
         ...batch
       ];
 
+      // Kalau hasil kurang dari 1000,
+      // berarti sudah sampai halaman terakhir
       if (batch.length < pageSize) {
         break;
       }
@@ -138,6 +148,7 @@ export default function DashboardKantor() {
 
     const dbRows = semuaDataView;
 
+    // Cek jumlah kecamatan yang berhasil dimuat
     const daftarKecDariDB = [
       ...new Map(
         dbRows.map(item => [
@@ -157,8 +168,10 @@ export default function DashboardKantor() {
 
     console.table(daftarKecDariDB);
 
+    // Simpan semua data view ke state
     setRawViewData(dbRows);
 
+    // Ambil daftar snapshot
     const daftarTanggal = [
       ...new Set(
         dbRows.map(item => item.tanggal_snapshot)
@@ -169,6 +182,7 @@ export default function DashboardKantor() {
 
     setAvailableSnapshots(daftarTanggal);
 
+    // Proses data ke dashboard
     filterDanProsesDataLokal(
       dbRows,
       mainMasalahTab,
