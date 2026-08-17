@@ -287,53 +287,122 @@ export default function DashboardLapangan() {
 
   // --- SAVE TINDAK LANJUT DENGAN EFEK DOMINO OTOMATIS LINIMASA ---
   const handleSaveTindakLanjut = async () => {
-    if (!catatanLapanganForm.trim()) return alert('Catatan lapangan/konfirmasi wajib diisi!');
+    if (!catatanLapanganForm.trim()) {
+      return alert('Catatan lapangan/konfirmasi wajib diisi!');
+    }
+
+    if (!editingAnomali?.snapshots?.length) {
+      return alert('Data anomali tidak memiliki ID tindak lanjut yang valid. Silakan muat ulang halaman.');
+    }
+
     setSubmitting(true);
+
     try {
-      const payloadMassal = editingAnomali.snapshots.map(snap => ({
-        anomali_id: snap.anomali_id,
-        status_konfirmasi: statusKonfirmasiForm,
-        catatan_lapangan: catatanLapanganForm,
-        dkonfirmasi_oleh_email: profilUser?.email,
-        tanggal_konfirmasi: new Date().toISOString()
-      }));
+      const waktuKonfirmasi = new Date().toISOString();
 
-      const { error } = await supabaseData
-        .from('tindak_lanjut_anomali')
-        .upsert(payloadMassal, { onConflict: 'anomali_id' });
+      console.log('=== SIMPAN KONFIRMASI PCL ===');
+      console.log('Assignment:', editingAnomali.assignment_id);
+      console.log('Kode:', editingAnomali.kode_anomali);
+      console.log('Snapshot target:', editingAnomali.snapshots);
 
-      if (error) throw error;
+      // tindak_lanjut_anomali sudah dibuat saat anomali_data masuk.
+      // Karena itu gunakan UPDATE, bukan UPSERT.
+      // Ini menghindari jalur INSERT/RLS dan memastikan kita benar-benar
+      // mengubah baris yang sudah ada.
+      const hasilUpdate = await Promise.all(
+        editingAnomali.snapshots.map(async (snap) => {
+          if (!snap.anomali_id) {
+            throw new Error('anomali_id tidak ditemukan pada data snapshot.');
+          }
 
-      // Update Cache Lokal
-      setRawMonitoringData(prev => prev.map(item => {
-        const match = editingAnomali.snapshots.some(s => s.anomali_id === item.anomali_id);
-        if (match) {
-          return { ...item, status_konfirmasi: statusKonfirmasiForm, catatan_lapangan: catatanLapanganForm };
-        }
-        return item;
-      }));
+          const { data, error } = await supabaseData
+            .from('tindak_lanjut_anomali')
+            .update({
+              status_konfirmasi: statusKonfirmasiForm,
+              catatan_lapangan: catatanLapanganForm.trim(),
+              dkonfirmasi_oleh_email: profilUser?.email,
+              tanggal_konfirmasi: waktuKonfirmasi
+            })
+            .eq('anomali_id', snap.anomali_id)
+            .select(
+              'anomali_id, status_konfirmasi, catatan_lapangan, dkonfirmasi_oleh_email, tanggal_konfirmasi'
+            )
+            .single();
 
-      setDaftarAnomaliRuta(prevRuta => 
+          if (error) {
+            throw error;
+          }
+
+          if (!data) {
+            throw new Error(
+              `Baris tindak lanjut untuk anomali_id ${snap.anomali_id} tidak berhasil diperbarui.`
+            );
+          }
+
+          return data;
+        })
+      );
+
+      console.log('✅ HASIL UPDATE KONFIRMASI:', hasilUpdate);
+
+      // Update cache lokal setelah database benar-benar berhasil.
+      setRawMonitoringData(prev =>
+        prev.map(item => {
+          const match = editingAnomali.snapshots.some(
+            s => s.anomali_id === item.anomali_id
+          );
+
+          if (match) {
+            return {
+              ...item,
+              status_konfirmasi: statusKonfirmasiForm,
+              catatan_lapangan: catatanLapanganForm.trim(),
+              dkonfirmasi_oleh_email: profilUser?.email,
+              tanggal_konfirmasi: waktuKonfirmasi
+            };
+          }
+
+          return item;
+        })
+      );
+
+      setDaftarAnomaliRuta(prevRuta =>
         prevRuta.map(ruta => {
-          if (ruta.assignment_id !== editingAnomali.assignment_id) return ruta;
+          if (ruta.assignment_id !== editingAnomali.assignment_id) {
+            return ruta;
+          }
+
           return {
             ...ruta,
             daftar_error: ruta.daftar_error.map(err => {
-              if (err.kode_anomali !== editingAnomali.kode_anomali) return err;
+              if (err.kode_anomali !== editingAnomali.kode_anomali) {
+                return err;
+              }
+
               return {
                 ...err,
                 status_konfirmasi: statusKonfirmasiForm,
-                catatan_lapangan: catatanLapanganForm,
-                snapshots: err.snapshots.map(s => ({ ...s, status_konfirmasi: statusKonfirmasiForm }))
+                catatan_lapangan: catatanLapanganForm.trim(),
+                snapshots: err.snapshots.map(s => ({
+                  ...s,
+                  status_konfirmasi: statusKonfirmasiForm
+                }))
               };
             })
           };
         })
       );
 
+      alert('Konfirmasi lapangan berhasil disimpan.');
       setEditingAnomali(null);
+
     } catch (err) {
-      alert('Gagal menyimpan konfirmasi lapangan: ' + err.message);
+      console.error('❌ GAGAL SIMPAN KONFIRMASI PCL:', err);
+
+      alert(
+        'Gagal menyimpan konfirmasi lapangan: ' +
+        (err?.message || err)
+      );
     } finally {
       setSubmitting(false);
     }
