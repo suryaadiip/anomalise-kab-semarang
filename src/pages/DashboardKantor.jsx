@@ -160,6 +160,7 @@ export default function DashboardKantor() {
         selectedSnapshot,
         daftarTanggal
       );
+
     } catch (err) {
       console.error('❌ GAGAL FETCH DATA MONITORING KANTOR:', err);
 
@@ -298,8 +299,8 @@ export default function DashboardKantor() {
           defval: ''
         });
 
-        // File BPS memiliki satu baris nomor kolom: (1), (2), ... (69).
-        // Baris tersebut bukan data responden, jadi buang otomatis.
+        // File BPS dapat memiliki satu baris nomor kolom: (1), (2), ... .
+        // Itu bukan data responden, jadi dibuang otomatis.
         const rawData = rawDataAwal.filter((row) => {
           const nilaiTerisi = Object.values(row)
             .map((nilai) => String(nilai ?? '').trim())
@@ -368,29 +369,28 @@ export default function DashboardKantor() {
       return;
     }
 
-    const normalisasiTeks = (nilai) =>
-      String(nilai ?? '')
-        .toLowerCase()
-        .normalize('NFKD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[\r\n\t]+/g, ' ')
-        .replace(/[^a-z0-9]+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+    const itemHasilOlahan = rawExcelData.map((row, index) => {
+      const namaAnomaliRaw = row[columnMap.nama_anomali] || '';
 
-    const cariAturanCocok = (teksAnomali) => {
-      const teksNormal = normalisasiTeks(teksAnomali);
+      const normalisasiTeks = (nilai) =>
+        String(nilai ?? '')
+          .toLowerCase()
+          .normalize('NFKD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[\r\n\t]+/g, ' ')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
 
-      // Prioritas 1: deskripsi master harus muncul di potongan anomali.
-      const cocokDeskripsi = masterAnomali.find((aturan) => {
+      const teksNormal = normalisasiTeks(namaAnomaliRaw);
+
+      const aturanCocok = masterAnomali.find((aturan) => {
         const deskripsiNormal = normalisasiTeks(aturan.deskripsi);
-        return deskripsiNormal && teksNormal.includes(deskripsiNormal);
-      });
 
-      if (cocokDeskripsi) return cocokDeskripsi;
+        if (deskripsiNormal && teksNormal.includes(deskripsiNormal)) {
+          return true;
+        }
 
-      // Prioritas 2: fallback kata kunci.
-      return masterAnomali.find((aturan) => {
         const daftarKataKunci = String(aturan.kata_kunci || '')
           .split(',')
           .map((kata) => normalisasiTeks(kata))
@@ -400,118 +400,46 @@ export default function DashboardKantor() {
           teksNormal.includes(kataKunci)
         );
       });
-    };
 
-    const pecahDaftarAnomali = (nilai) => {
-      const sumber = String(nilai ?? '').trim();
-      if (!sumber) return [''];
+      const kodeAnomali = aturanCocok ? aturanCocok.kode : 'ERR';
 
-      // Contoh:
-      // "Anomali Keluarga 5 (...), Anomali Usaha 2 (...)"
-      // menjadi dua item terpisah.
-      const potongan = sumber
-        .split(/(?=Anomali\s+(?:Usaha|Keluarga)\s+\d+\s*\()/gi)
-        .map((bagian) =>
-          bagian
-            .trim()
-            .replace(/^,\s*/, '')
-            .trim()
-        )
-        .filter(Boolean);
+      console.log('MATCH ANOMALI:', {
+        teks_excel: namaAnomaliRaw,
+        master_kode: aturanCocok?.kode || 'ERR',
+        master_deskripsi: aturanCocok?.deskripsi || null,
+        master_kata_kunci: aturanCocok?.kata_kunci || null
+      });
 
-      return potongan.length > 0 ? potongan : [sumber];
-    };
-
-    const itemHasilOlahan = rawExcelData.flatMap((row, index) => {
-      const namaAnomaliRaw = row[columnMap.nama_anomali] || '';
-
-      const desaRaw = columnMap.kodedesa
-        ? String(row[columnMap.kodedesa] || '')
-        : '';
-
-      const slsRaw = columnMap.sls
-        ? String(row[columnMap.sls] || '')
-        : '';
-
-      const subSlsRaw = columnMap.subsls
-        ? String(row[columnMap.subsls] || '')
-        : '00';
+      const desaRaw = columnMap.kodedesa ? String(row[columnMap.kodedesa] || '') : '';
+      const slsRaw = columnMap.sls ? String(row[columnMap.sls] || '') : '';
+      const subSlsRaw = columnMap.subsls ? String(row[columnMap.subsls] || '') : '00';
 
       const desa = desaRaw.trim().padStart(10, '0');
       const sls = slsRaw.trim().padStart(4, '0');
       const subSls = subSlsRaw.trim().padStart(2, '0');
       const generatedIdSubSls = `${desa}${sls}${subSls}`;
 
-      const assignmentId = String(
-        row[columnMap.assignment_id] || `GEN-${Date.now()}-${index}`
-      ).trim();
-
-      const namaSubjek =
-        row[columnMap.nama_subjek] || 'Tanpa Nama';
-
-      const linkFasih = columnMap.link_fasih
-        ? (row[columnMap.link_fasih] || '')
-        : '';
-
-      const daftarPotongan = pecahDaftarAnomali(namaAnomaliRaw);
-
-      const hasilPerBaris = daftarPotongan.map((teksPotongan, urutan) => {
-        const aturanCocok = cariAturanCocok(teksPotongan);
-        const kodeAnomali = aturanCocok ? aturanCocok.kode : 'ERR';
-
-        console.log('MATCH ANOMALI PER ITEM:', {
-          baris_excel: index + 1,
-          teks_excel_asli: namaAnomaliRaw,
-          teks_item: teksPotongan,
-          master_kode: aturanCocok?.kode || 'ERR',
-          master_deskripsi: aturanCocok?.deskripsi || null,
-          master_kata_kunci: aturanCocok?.kata_kunci || null
-        });
-
-        return {
-          id_lokal: `${index}-${urutan}`,
-          baris_excel: index + 1,
-          idsubsls: generatedIdSubSls,
-          assignment_id: assignmentId,
-          nama_subjek: namaSubjek,
-          // Simpan hanya teks item yang sedang diproses.
-          // Ini juga membuat klasifikasi ANOMALI/MISSING_VALUE lebih tepat.
-          teks_anomali_asli: String(teksPotongan),
-          kode_anomali: kodeAnomali,
-          link_fasih: linkFasih
-        };
-      });
-
-      // Pengaman: kalau satu sel secara tidak sengaja menyebut kode yang sama
-      // lebih dari sekali, cukup simpan satu item untuk kode tersebut.
-      const kodeSudahAda = new Set();
-
-      return hasilPerBaris.filter((item) => {
-        if (item.kode_anomali === 'ERR') return true;
-
-        if (kodeSudahAda.has(item.kode_anomali)) {
-          return false;
-        }
-
-        kodeSudahAda.add(item.kode_anomali);
-        return true;
-      });
+      return {
+        id_lokal: index,
+        idsubsls: generatedIdSubSls,
+        assignment_id: String(row[columnMap.assignment_id] || `GEN-${Date.now()}-${index}`),
+        nama_subjek: row[columnMap.nama_subjek] || 'Tanpa Nama',
+        teks_anomali_asli: String(namaAnomaliRaw), 
+        kode_anomali: kodeAnomali,
+        link_fasih: columnMap.link_fasih ? (row[columnMap.link_fasih] || '') : ''
+      };
     });
 
+    console.log('✅ MODE IMPORT: 1 BARIS EXCEL = 1 RECORD ANOMALI');
     console.log('✅ TOTAL BARIS EXCEL VALID:', rawExcelData.length);
+    console.log('✅ TOTAL ITEM REVIEW:', itemHasilOlahan.length);
     console.log(
-      '✅ TOTAL ITEM ANOMALI SETELAH DIPECAH:',
-      itemHasilOlahan.length
+      '⚠️ TOTAL ITEM ERR:',
+      itemHasilOlahan.filter(item => item.kode_anomali === 'ERR').length
     );
 
-    const jumlahErr = itemHasilOlahan.filter(
-      (item) => item.kode_anomali === 'ERR'
-    ).length;
-
-    console.log('⚠️ TOTAL ITEM ERR:', jumlahErr);
-
     setMappedRowItems(itemHasilOlahan);
-    setUploadProgressStatus('review_rows');
+    setUploadProgressStatus('review_rows'); 
   };
 
   const handleUbahKodeBarisManual = (idLokal, kodeBaru) => {
@@ -1308,7 +1236,7 @@ export default function DashboardKantor() {
             {uploadProgressStatus === 'review_rows' && (
               <div className="space-y-4">
                 <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-xs text-amber-900 font-medium">
-                  💡 <strong>Informasi:</strong> Setiap sel <em>Daftar Anomali</em> yang berisi beberapa anomali otomatis dipecah menjadi beberapa item. Sistem menandai item yang tidak lolos aturan otomatis dengan kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span>. Semua ERR wajib dipilih manual sebelum sinkronisasi dijalankan.
+                  💡 <strong>Informasi:</strong> Di bawah ini adalah daftar baris berkas Excel Anda. Sistem menandai anomali yang tidak lolos aturan otomatis dengan kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span>. Anda diwajibkan memilih manual melalui dropdown sebelum sinkronisasi dijalankan.
                 </div>
 
                 <div className="overflow-x-auto border rounded-xl max-h-[50vh] bg-stone-50 shadow-inner">
