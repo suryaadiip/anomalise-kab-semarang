@@ -94,117 +94,83 @@ export default function DashboardKantor() {
     }
   };
 
- const fetchDataMonitoringKantor = async () => {
-  setLoading(true);
+  const fetchDataMonitoringKantor = async () => {
+    setLoading(true);
 
-  try {
-    const pageSize = 1000;
-    let from = 0;
-    let semuaDataView = [];
+    try {
+      const pageSize = 1000;
+      let from = 0;
+      let semuaDataView = [];
 
-    while (true) {
-      const { data, error } = await supabaseData
-        .from('view_rekap_agregat_kantor')
-        .select('*')
+      while (true) {
+        const { data, error } = await supabaseData
+          .from('view_rekap_agregat_kantor')
+          .select('*')
+          .order('tanggal_snapshot', { ascending: false })
+          .order('kdkec', { ascending: true })
+          .order('idsubsls', { ascending: true })
+          .order('pml_email', { ascending: true })
+          .order('kode_anomali', { ascending: true })
+          .order('tipe_masalah', { ascending: true })
+          .range(from, from + pageSize - 1);
 
-        // Urutan dibuat stabil untuk pagination
-        .order('tanggal_snapshot', { ascending: false })
-        .order('kdkec', { ascending: true })
-        .order('idsubsls', { ascending: true })
-        .order('pml_email', { ascending: true })
-        .order('kode_anomali', { ascending: true })
-        .order('tipe_masalah', { ascending: true })
+        if (error) throw error;
 
-        .range(from, from + pageSize - 1);
+        const batch = data || [];
 
-      if (error) {
-        throw error;
+        console.log(
+          `📦 FETCH VIEW: ${from} - ${from + pageSize - 1} = ${batch.length} row`
+        );
+
+        semuaDataView = [...semuaDataView, ...batch];
+
+        if (batch.length < pageSize) break;
+        from += pageSize;
       }
 
-      const batch = data || [];
+      console.log('✅ TOTAL ROW VIEW DITERIMA:', semuaDataView.length);
 
-      console.log(
-        `📦 FETCH VIEW: ${from} - ${from + pageSize - 1} = ${batch.length} row`
-      );
+      const dbRows = semuaDataView;
 
-      semuaDataView = [
-        ...semuaDataView,
-        ...batch
+      const daftarKecDariDB = [
+        ...new Map(
+          dbRows.map(item => [
+            `${item.kdkec}_${item.nmkec}`,
+            { kdkec: item.kdkec, nmkec: item.nmkec }
+          ])
+        ).values()
       ];
 
-      // Kalau hasil kurang dari 1000,
-      // berarti sudah sampai halaman terakhir
-      if (batch.length < pageSize) {
-        break;
-      }
+      console.log('✅ JUMLAH KEC DARI VIEW:', daftarKecDariDB.length);
+      console.table(daftarKecDariDB);
 
-      from += pageSize;
+      setRawViewData(dbRows);
+
+      const daftarTanggal = [
+        ...new Set(dbRows.map(item => item.tanggal_snapshot))
+      ]
+        .filter(Boolean)
+        .sort((a, b) => b.localeCompare(a));
+
+      setAvailableSnapshots(daftarTanggal);
+
+      filterDanProsesDataLokal(
+        dbRows,
+        mainMasalahTab,
+        selectedSnapshot,
+        daftarTanggal
+      );
+    } catch (err) {
+      console.error('❌ GAGAL FETCH DATA MONITORING KANTOR:', err);
+
+      alert(
+        'Gagal mengambil data monitoring: ' +
+        (err?.message || err)
+      );
+    } finally {
+      setLoading(false);
     }
-
-    console.log(
-      '✅ TOTAL ROW VIEW DITERIMA:',
-      semuaDataView.length
-    );
-
-    const dbRows = semuaDataView;
-
-    // Cek jumlah kecamatan yang berhasil dimuat
-    const daftarKecDariDB = [
-      ...new Map(
-        dbRows.map(item => [
-          `${item.kdkec}_${item.nmkec}`,
-          {
-            kdkec: item.kdkec,
-            nmkec: item.nmkec
-          }
-        ])
-      ).values()
-    ];
-
-    console.log(
-      '✅ JUMLAH KEC DARI VIEW:',
-      daftarKecDariDB.length
-    );
-
-    console.table(daftarKecDariDB);
-
-    // Simpan semua data view ke state
-    setRawViewData(dbRows);
-
-    // Ambil daftar snapshot
-    const daftarTanggal = [
-      ...new Set(
-        dbRows.map(item => item.tanggal_snapshot)
-      )
-    ]
-      .filter(Boolean)
-      .sort((a, b) => b.localeCompare(a));
-
-    setAvailableSnapshots(daftarTanggal);
-
-    // Proses data ke dashboard
-    filterDanProsesDataLokal(
-      dbRows,
-      mainMasalahTab,
-      selectedSnapshot,
-      daftarTanggal
-    );
-
-  } catch (err) {
-    console.error(
-      '❌ GAGAL FETCH DATA MONITORING KANTOR:',
-      err
-    );
-
-    alert(
-      'Gagal mengambil data monitoring: ' +
-      (err?.message || err)
-    );
-
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
   // FUNGSI OPTIMALISASI UTAMA: Memilah data langsung di RAM browser berdasarkan Tab & Snapshot
   const filterDanProsesDataLokal = (semuaData, tabAktif, snapshotDipilih, daftarTglSnap = availableSnapshots) => {
@@ -220,26 +186,6 @@ export default function DashboardKantor() {
     } else if (snapshotDipilih !== 'semua' && snapshotDipilih !== 'terakhir') {
       dataTerfilter = dataTerfilter.filter(item => item.tanggal_snapshot === snapshotDipilih);
     }
-console.log('========== DEBUG DASHBOARD ==========');
-console.log('Total semuaData:', semuaData.length);
-console.log('Tab aktif:', tabAktif);
-console.log('Snapshot dipilih:', snapshotDipilih);
-console.log('Total dataTerfilter:', dataTerfilter.length);
-
-const daftarKecTerfilter = [
-  ...new Map(
-    dataTerfilter.map(item => [
-      `${item.kdkec}_${item.nmkec}`,
-      {
-        kdkec: item.kdkec,
-        nmkec: item.nmkec
-      }
-    ])
-  ).values()
-];
-
-console.log('Jumlah KEC setelah filter:', daftarKecTerfilter.length);
-console.table(daftarKecTerfilter);
 
     hitungMetrikGlobal(dataTerfilter);
     prosesStrukturAgregat(dataTerfilter);
@@ -332,7 +278,6 @@ console.table(daftarKecTerfilter);
 
     finalTree.sort((a, b) => String(a.kodeKec).localeCompare(String(b.kodeKec), undefined, { numeric: true }));
     setTreeData(finalTree);
-    
   };
 
   const handlePilihFileExcel = (e) => {
@@ -348,30 +293,30 @@ console.table(daftarKecTerfilter);
         const bstr = evt.target.result;
         const wb = XLSX.read(bstr, { type: 'binary' });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const rawData = XLSX.utils.sheet_to_json(ws, {
+        const rawDataAwal = XLSX.utils.sheet_to_json(ws, {
           range: 3,
           defval: ''
         });
 
-        // Buang baris penomoran Excel: (1), (2), (3), ... (14)
-const dataExcel = rawData.filter((row) => {
-  const values = Object.values(row)
-    .map(value => String(value ?? '').trim())
-    .filter(Boolean);
+        // File BPS memiliki satu baris nomor kolom: (1), (2), ... (69).
+        // Baris tersebut bukan data responden, jadi buang otomatis.
+        const rawData = rawDataAwal.filter((row) => {
+          const nilaiTerisi = Object.values(row)
+            .map((nilai) => String(nilai ?? '').trim())
+            .filter(Boolean);
 
-  // Cek apakah baris berisi penanda seperti (1), (2), (3), dst.
-  const adalahBarisPenomoran =
-    values.length > 0 &&
-    values.every(value => /^\(\d+\)$/.test(value));
+          const barisNomorKolom =
+            nilaiTerisi.length > 0 &&
+            nilaiTerisi.every((nilai) => /^\(\d+\)$/.test(nilai));
 
-  return !adalahBarisPenomoran;
-});
+          return !barisNomorKolom;
+        });
 
-        if (dataExcel.length === 0) {
-  alert('File Excel kosong atau tidak memiliki data!');
-  setUploading(false);
-  return;
-}
+        if (rawData.length === 0) {
+          alert('File Excel kosong!');
+          setUploading(false);
+          return;
+        }
 
         const headersAsli = Object.keys(rawData[0]);
         setExcelHeaders(headersAsli);
@@ -405,7 +350,7 @@ const dataExcel = rawData.filter((row) => {
           link_fasih: tebakKolom(['linkfasih', 'link_fasih', 'urlfasih', 'tautan'])
         });
 
-        setRawExcelData(dataExcel);
+        setRawExcelData(rawData);
         setHasilUploadRingkasan(null);
         setModalUploadReview(true); 
       } catch (err) {
@@ -423,28 +368,29 @@ const dataExcel = rawData.filter((row) => {
       return;
     }
 
-    const itemHasilOlahan = rawExcelData.map((row, index) => {
-      const namaAnomaliRaw = row[columnMap.nama_anomali] || '';
+    const normalisasiTeks = (nilai) =>
+      String(nilai ?? '')
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 
-      const normalisasiTeks = (nilai) =>
-        String(nilai ?? '')
-          .toLowerCase()
-          .normalize('NFKD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/[\r\n\t]+/g, ' ')
-          .replace(/[^a-z0-9]+/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
+    const cariAturanCocok = (teksAnomali) => {
+      const teksNormal = normalisasiTeks(teksAnomali);
 
-      const teksNormal = normalisasiTeks(namaAnomaliRaw);
-
-      const aturanCocok = masterAnomali.find((aturan) => {
+      // Prioritas 1: deskripsi master harus muncul di potongan anomali.
+      const cocokDeskripsi = masterAnomali.find((aturan) => {
         const deskripsiNormal = normalisasiTeks(aturan.deskripsi);
+        return deskripsiNormal && teksNormal.includes(deskripsiNormal);
+      });
 
-        if (deskripsiNormal && teksNormal.includes(deskripsiNormal)) {
-          return true;
-        }
+      if (cocokDeskripsi) return cocokDeskripsi;
 
+      // Prioritas 2: fallback kata kunci.
+      return masterAnomali.find((aturan) => {
         const daftarKataKunci = String(aturan.kata_kunci || '')
           .split(',')
           .map((kata) => normalisasiTeks(kata))
@@ -454,38 +400,118 @@ const dataExcel = rawData.filter((row) => {
           teksNormal.includes(kataKunci)
         );
       });
+    };
 
-      const kodeAnomali = aturanCocok ? aturanCocok.kode : 'ERR';
+    const pecahDaftarAnomali = (nilai) => {
+      const sumber = String(nilai ?? '').trim();
+      if (!sumber) return [''];
 
-      console.log('MATCH ANOMALI:', {
-        teks_excel: namaAnomaliRaw,
-        master_kode: aturanCocok?.kode || 'ERR',
-        master_deskripsi: aturanCocok?.deskripsi || null,
-        master_kata_kunci: aturanCocok?.kata_kunci || null
-      });
+      // Contoh:
+      // "Anomali Keluarga 5 (...), Anomali Usaha 2 (...)"
+      // menjadi dua item terpisah.
+      const potongan = sumber
+        .split(/(?=Anomali\s+(?:Usaha|Keluarga)\s+\d+\s*\()/gi)
+        .map((bagian) =>
+          bagian
+            .trim()
+            .replace(/^,\s*/, '')
+            .trim()
+        )
+        .filter(Boolean);
 
-      const desaRaw = columnMap.kodedesa ? String(row[columnMap.kodedesa] || '') : '';
-      const slsRaw = columnMap.sls ? String(row[columnMap.sls] || '') : '';
-      const subSlsRaw = columnMap.subsls ? String(row[columnMap.subsls] || '') : '00';
+      return potongan.length > 0 ? potongan : [sumber];
+    };
+
+    const itemHasilOlahan = rawExcelData.flatMap((row, index) => {
+      const namaAnomaliRaw = row[columnMap.nama_anomali] || '';
+
+      const desaRaw = columnMap.kodedesa
+        ? String(row[columnMap.kodedesa] || '')
+        : '';
+
+      const slsRaw = columnMap.sls
+        ? String(row[columnMap.sls] || '')
+        : '';
+
+      const subSlsRaw = columnMap.subsls
+        ? String(row[columnMap.subsls] || '')
+        : '00';
 
       const desa = desaRaw.trim().padStart(10, '0');
       const sls = slsRaw.trim().padStart(4, '0');
       const subSls = subSlsRaw.trim().padStart(2, '0');
       const generatedIdSubSls = `${desa}${sls}${subSls}`;
 
-      return {
-        id_lokal: index,
-        idsubsls: generatedIdSubSls,
-        assignment_id: String(row[columnMap.assignment_id] || `GEN-${Date.now()}-${index}`),
-        nama_subjek: row[columnMap.nama_subjek] || 'Tanpa Nama',
-        teks_anomali_asli: String(namaAnomaliRaw), 
-        kode_anomali: kodeAnomali,
-        link_fasih: columnMap.link_fasih ? (row[columnMap.link_fasih] || '') : ''
-      };
+      const assignmentId = String(
+        row[columnMap.assignment_id] || `GEN-${Date.now()}-${index}`
+      ).trim();
+
+      const namaSubjek =
+        row[columnMap.nama_subjek] || 'Tanpa Nama';
+
+      const linkFasih = columnMap.link_fasih
+        ? (row[columnMap.link_fasih] || '')
+        : '';
+
+      const daftarPotongan = pecahDaftarAnomali(namaAnomaliRaw);
+
+      const hasilPerBaris = daftarPotongan.map((teksPotongan, urutan) => {
+        const aturanCocok = cariAturanCocok(teksPotongan);
+        const kodeAnomali = aturanCocok ? aturanCocok.kode : 'ERR';
+
+        console.log('MATCH ANOMALI PER ITEM:', {
+          baris_excel: index + 1,
+          teks_excel_asli: namaAnomaliRaw,
+          teks_item: teksPotongan,
+          master_kode: aturanCocok?.kode || 'ERR',
+          master_deskripsi: aturanCocok?.deskripsi || null,
+          master_kata_kunci: aturanCocok?.kata_kunci || null
+        });
+
+        return {
+          id_lokal: `${index}-${urutan}`,
+          baris_excel: index + 1,
+          idsubsls: generatedIdSubSls,
+          assignment_id: assignmentId,
+          nama_subjek: namaSubjek,
+          // Simpan hanya teks item yang sedang diproses.
+          // Ini juga membuat klasifikasi ANOMALI/MISSING_VALUE lebih tepat.
+          teks_anomali_asli: String(teksPotongan),
+          kode_anomali: kodeAnomali,
+          link_fasih: linkFasih
+        };
+      });
+
+      // Pengaman: kalau satu sel secara tidak sengaja menyebut kode yang sama
+      // lebih dari sekali, cukup simpan satu item untuk kode tersebut.
+      const kodeSudahAda = new Set();
+
+      return hasilPerBaris.filter((item) => {
+        if (item.kode_anomali === 'ERR') return true;
+
+        if (kodeSudahAda.has(item.kode_anomali)) {
+          return false;
+        }
+
+        kodeSudahAda.add(item.kode_anomali);
+        return true;
+      });
     });
 
+    console.log('✅ TOTAL BARIS EXCEL VALID:', rawExcelData.length);
+    console.log(
+      '✅ TOTAL ITEM ANOMALI SETELAH DIPECAH:',
+      itemHasilOlahan.length
+    );
+
+    const jumlahErr = itemHasilOlahan.filter(
+      (item) => item.kode_anomali === 'ERR'
+    ).length;
+
+    console.log('⚠️ TOTAL ITEM ERR:', jumlahErr);
+
     setMappedRowItems(itemHasilOlahan);
-    setUploadProgressStatus('review_rows'); 
+    setUploadProgressStatus('review_rows');
   };
 
   const handleUbahKodeBarisManual = (idLokal, kodeBaru) => {
@@ -504,415 +530,151 @@ const dataExcel = rawData.filter((row) => {
     setUploadProgressStatus('mengirim');
 
     try {
+      const { data: historiLengkap } = await supabaseData
+        .from('view_monitoring_anomali')
+        .select('assignment_id, kode_anomali, nama_subjek, tanggal_snapshot, status_konfirmasi, catatan_lapangan, dkonfirmasi_oleh_email, tanggal_konfirmasi')
+        .not('catatan_lapangan', 'is', null);
 
-  const { data: historiLengkap, error: errorHistori } = await supabaseData
-    .from('view_monitoring_anomali')
-    .select(`
-      assignment_id,
-      kode_anomali,
-      nama_subjek,
-      tanggal_snapshot,
-      status_konfirmasi,
-      catatan_lapangan,
-      dkonfirmasi_oleh_email,
-      tanggal_konfirmasi
-    `)
-    .not('catatan_lapangan', 'is', null);
+      const { data: dataMenggantung } = await supabaseData
+        .from('view_monitoring_anomali')
+        .select('assignment_id, kode_anomali, nama_subjek, pertama_muncul_pada')
+        .not('status_fasih', 'eq', 'Sudah Tindak Lanjut FASIH');
 
-  if (errorHistori) {
-    throw errorHistori;
-  }
+      let jumlahSukses = 0;
+      let jumlahGagal = 0;
 
-  const { data: dataMenggantung, error: errorMenggantung } =
-    await supabaseData
-      .from('view_monitoring_anomali')
-      .select(`
-        assignment_id,
-        kode_anomali,
-        nama_subjek,
-        pertama_muncul_pada
-      `)
-      .not('status_fasih', 'eq', 'Sudah Tindak Lanjut FASIH');
+      const petaCatatanRiwayat = {};
+      const setKunciUnikImpor = new Set(); 
 
-  if (errorMenggantung) {
-    throw errorMenggantung;
-  }
+      const formattedDataRaw = mappedRowItems.map((item) => {
+        try {
+          const aturanCocok = masterAnomali.find(a => a.kode === item.kode_anomali);
+          const kategori = aturanCocok ? aturanCocok.kategori : 'USAHA';
 
-  let jumlahSukses = 0;
-  let jumlahGagal = 0;
-
-  const petaCatatanRiwayat = {};
-  const setKunciUnikImpor = new Set();
-
-  const formattedDataRaw = mappedRowItems
-    .map((item) => {
-
-      try {
-
-        const aturanCocok = masterAnomali.find(
-          (a) => a.kode === item.kode_anomali
-        );
-
-        const kategori = aturanCocok
-          ? aturanCocok.kategori
-          : 'USAHA';
-
-        const teksCari = String(
-          item.teks_anomali_asli || ''
-        ).toLowerCase();
-
-        const tipeMasalahDitemukan =
-          (
-            teksCari.includes('kosong') ||
-            teksCari.includes('missing') ||
-            teksCari.includes('tidak ada')
-          )
-            ? 'MISSING_VALUE'
+          const teksCari = item.teks_anomali_asli.toLowerCase();
+          const tipeMasalahDitemukan = (teksCari.includes('kosong') || teksCari.includes('missing') || teksCari.includes('tidak ada')) 
+            ? 'MISSING_VALUE' 
             : 'ANOMALI';
 
-        const namaSubjekBersih =
-          String(item.nama_subjek || '').trim();
-
-        const temukanDataLama = dataMenggantung?.find(
-          (old) =>
-            String(old.assignment_id).trim() ===
-              String(item.assignment_id).trim() &&
-
-            String(old.kode_anomali).trim() ===
-              String(item.kode_anomali).trim() &&
-
-            String(old.nama_subjek)
-              .trim()
-              .toLowerCase() ===
-              namaSubjekBersih.toLowerCase()
-        );
-
-        const jejakMasaLalu = historiLengkap?.find(
-          (old) =>
-            String(old.assignment_id)
-              .trim()
-              .toLowerCase() ===
-              String(item.assignment_id)
-                .trim()
-                .toLowerCase() &&
-
-            String(old.kode_anomali)
-              .trim()
-              .toLowerCase() ===
-              String(item.kode_anomali)
-                .trim()
-                .toLowerCase() &&
-
-            String(old.nama_subjek)
-              .trim()
-              .toLowerCase() ===
-              namaSubjekBersih.toLowerCase() &&
-
-            old.tanggal_snapshot < pilihanTanggalSnapshot
-        );
-
-        const keyGabung =
-          `${String(item.assignment_id).trim()}_` +
-          `${String(item.kode_anomali).trim()}_` +
-          `${namaSubjekBersih.toLowerCase()}`;
-
-
-        if (jejakMasaLalu) {
-          petaCatatanRiwayat[keyGabung] =
-            jejakMasaLalu;
-        }
-
-        jumlahSukses++;
-
-        return {
-          idsubsls: item.idsubsls,
-
-          assignment_id:
-            item.assignment_id,
-
-          nama_subjek:
-            namaSubjekBersih,
-
-          kode_anomali:
-            item.kode_anomali,
-
-          kategori_anomali:
-            kategori,
-
-          link_fasih:
-            item.link_fasih,
-
-          tanggal_snapshot:
-            pilihanTanggalSnapshot,
-
-          pertama_muncul_pada:
-            temukanDataLama
-              ? temukanDataLama.pertama_muncul_pada
-              : pilihanTanggalSnapshot,
-
-          tipe_masalah:
-            tipeMasalahDitemukan
-        };
-
-      } catch (errRow) {
-
-        console.error(
-          'Gagal memproses baris Excel:',
-          item,
-          errRow
-        );
-
-        jumlahGagal++;
-
-        return null;
-      }
-
-    })
-    .filter((item) => item !== null);
-
-  const formattedData =
-    formattedDataRaw.filter((item) => {
-
-      const kunciUnikBaris =
-        `${item.assignment_id}_` +
-        `${item.kode_anomali}_` +
-        `${item.nama_subjek.toLowerCase()}_` +
-        `${item.tanggal_snapshot}`;
-
-      if (
-        setKunciUnikImpor.has(kunciUnikBaris)
-      ) {
-        return false;
-      }
-
-      setKunciUnikImpor.add(
-        kunciUnikBaris
-      );
-
-      return true;
-    });
-
-
-  console.log(
-    '📦 TOTAL DATA SIAP IMPORT:',
-    formattedData.length
-  );
-
-  if (formattedData.length > 0) {
-
-    const {
-      data: dataBaruDisisipkan,
-      error: errorUpsertAnomali
-    } = await supabaseData
-      .from('anomali_data')
-      .upsert(
-        formattedData,
-        {
-          onConflict:
-            'assignment_id, kode_anomali, nama_subjek, tanggal_snapshot',
-
-          ignoreDuplicates: false
-        }
-      )
-      .select(
-        'id, assignment_id, kode_anomali, nama_subjek'
-      );
-
-
-    if (errorUpsertAnomali) {
-      throw errorUpsertAnomali;
-    }
-
-
-    console.log(
-      '✅ ANOMALI_DATA BERHASIL DIUPSERT:',
-      dataBaruDisisipkan?.length || 0
-    );
-
-    if (
-      dataBaruDisisipkan &&
-      dataBaruDisisipkan.length > 0
-    ) {
-
-      const payloadTindakLanjut = [];
-
-
-      dataBaruDisisipkan.forEach(
-        (barisBaru) => {
-
-          const keyCari =
-            `${String(barisBaru.assignment_id).trim()}_` +
-            `${String(barisBaru.kode_anomali).trim()}_` +
-            `${String(barisBaru.nama_subjek).trim().toLowerCase()}`;
-
-
-          const dataLamaDitemukan =
-            petaCatatanRiwayat[keyCari];
-
-          if (dataLamaDitemukan) {
-
-            payloadTindakLanjut.push({
-
-              anomali_id:
-                barisBaru.id,
-
-              status_konfirmasi:
-                dataLamaDitemukan.status_konfirmasi,
-
-              catatan_lapangan:
-                dataLamaDitemukan.catatan_lapangan,
-
-              dkonfirmasi_oleh_email:
-                dataLamaDitemukan.dkonfirmasi_oleh_email,
-
-              tanggal_konfirmasi:
-                dataLamaDitemukan.tanggal_konfirmasi,
-
-              status_monitoring:
-                'Belum Diperiksa',
-
-              catatan_pegawai:
-                null,
-
-              diperiksa_oleh_email:
-                null,
-
-              tanggal_periksa:
-                null,
-
-              status_fasih:
-                'Belum Tindak Lanjut FASIH',
-
-              dieksekusi_oleh_email:
-                null,
-
-              waktu_eksekusi_fasih:
-                null
-            });
-
-          }
-
-          else {
-
-            payloadTindakLanjut.push({
-
-              anomali_id:
-                barisBaru.id,
-
-              status_konfirmasi:
-                'Belum Tindak Lanjut',
-
-              catatan_lapangan:
-                null,
-
-              dkonfirmasi_oleh_email:
-                null,
-
-              tanggal_konfirmasi:
-                null,
-
-              status_monitoring:
-                'Belum Diperiksa',
-
-              catatan_pegawai:
-                null,
-
-              diperiksa_oleh_email:
-                null,
-
-              tanggal_periksa:
-                null,
-
-              status_fasih:
-                'Belum Tindak Lanjut FASIH',
-
-              dieksekusi_oleh_email:
-                null,
-
-              waktu_eksekusi_fasih:
-                null
-            });
-          }
-
-        }
-      );
-
-      if (
-        payloadTindakLanjut.length > 0
-      ) {
-
-        console.log(
-          '📋 PAYLOAD TINDAK LANJUT:',
-          payloadTindakLanjut.length
-        );
-
-
-        const {
-          error: errUpsertTindakLanjut
-        } = await supabaseData
-          .from('tindak_lanjut_anomali')
-          .upsert(
-            payloadTindakLanjut,
-            {
-              onConflict:
-                'anomali_id'
-            }
+          const namaSubjekBersih = String(item.nama_subjek).trim();
+
+          const temukanDataLama = dataMenggantung?.find(
+            old => old.assignment_id === item.assignment_id && 
+                   old.kode_anomali === item.kode_anomali &&
+                   String(old.nama_subjek).trim().toLowerCase() === namaSubjekBersih.toLowerCase()
           );
 
+          const jejakMasaLalu = historiLengkap?.find(
+            old => String(old.assignment_id).trim().toLowerCase() === String(item.assignment_id).trim().toLowerCase() && 
+                   String(old.kode_anomali).trim().toLowerCase() === String(item.kode_anomali).trim().toLowerCase() && 
+                   String(old.nama_subjek).trim().toLowerCase() === namaSubjekBersih.toLowerCase() &&
+                   old.tanggal_snapshot < pilihanTanggalSnapshot
+          );
 
-        if (errUpsertTindakLanjut) {
-          throw errUpsertTindakLanjut;
+          const keyGabung = `${String(item.assignment_id).trim()}_${String(item.kode_anomali).trim()}_${namaSubjekBersih.toLowerCase()}`;
+
+          if (jejakMasaLalu) {
+            petaCatatanRiwayat[keyGabung] = jejakMasaLalu;
+          }
+
+          jumlahSukses++;
+          return {
+            idsubsls: item.idsubsls,
+            assignment_id: item.assignment_id,
+            nama_subjek: namaSubjekBersih,
+            kode_anomali: item.kode_anomali,
+            kategori_anomali: kategori,
+            link_fasih: item.link_fasih,
+            tanggal_snapshot: pilihanTanggalSnapshot,
+            pertama_muncul_pada: temukanDataLama ? temukanDataLama.pertama_muncul_pada : pilihanTanggalSnapshot,
+            tipe_masalah: tipeMasalahDitemukan 
+          };
+        } catch (errRow) {
+          jumlahGagal++;
+          return null;
         }
+      }).filter(item => item !== null);
 
+      const formattedData = formattedDataRaw.filter((item) => {
+        const kunciUnikBaris = `${item.assignment_id}_${item.kode_anomali}_${item.nama_subjek.toLowerCase()}_${item.tanggal_snapshot}`;
+        if (setKunciUnikImpor.has(kunciUnikBaris)) {
+          return false; 
+        }
+        setKunciUnikImpor.add(kunciUnikBaris);
+        return true;
+      });
 
-        console.log(
-          '✅ TINDAK_LANJUT_ANOMALI BERHASIL DIUPSERT:',
-          payloadTindakLanjut.length
-        );
+      if (formattedData.length > 0) {
+        const { data: dataBaruDisisipkan, error } = await supabaseData
+          .from('anomali_data')
+          .upsert(formattedData, {
+            onConflict: 'assignment_id, kode_anomali, nama_subjek, tanggal_snapshot',
+            ignoreDuplicates: false 
+          })
+          .select('id, assignment_id, kode_anomali, nama_subjek');
+
+        if (error) throw error;
+
+        if (dataBaruDisisipkan && dataBaruDisisipkan.length > 0) {
+          const payloadTindakLanjut = [];
+
+          dataBaruDisisipkan.forEach((barisBaru) => {
+            const keyCari = `${String(barisBaru.assignment_id).trim()}_${String(barisBaru.kode_anomali).trim()}_${String(barisBaru.nama_subjek).trim().toLowerCase()}`;
+            const dataLamaDitemukan = petaCatatanRiwayat[keyCari];
+
+            if (dataLamaDitemukan) {
+              payloadTindakLanjut.push({
+                anomali_id: barisBaru.id, 
+                status_konfirmasi: dataLamaDitemukan.status_konfirmasi,
+                catatan_lapangan: dataLamaDitemukan.catatan_lapangan,
+                dkonfirmasi_oleh_email: dataLamaDitemukan.dkonfirmasi_oleh_email,
+                tanggal_konfirmasi: dataLamaDitemukan.tanggal_konfirmasi,
+                status_monitoring: 'Belum Diperiksa',
+                catatan_pegawai: null,
+                diperiksa_oleh_email: null,
+                tanggal_periksa: null,
+                status_fasih: 'Belum Tindak Lanjut FASIH',
+                dieksekusi_oleh_email: null,
+                waktu_eksekusi_fasih: null
+              });
+            } else {
+              payloadTindakLanjut.push({
+                anomali_id: barisBaru.id,
+                status_konfirmasi: 'Belum Tindak Lanjut',
+                catatan_lapangan: null,
+                dkonfirmasi_oleh_email: null,
+                tanggal_konfirmasi: null,
+                status_monitoring: 'Belum Diperiksa',
+                status_fasih: 'Belum Tindak Lanjut FASIH'
+              });
+            }
+          });
+
+          if (payloadTindakLanjut.length > 0) {
+            const { error: errUpsertTindakLanjut } = await supabaseData
+              .from('tindak_lanjut_anomali')
+              .upsert(payloadTindakLanjut, { onConflict: 'anomali_id' });
+
+            if (errUpsertTindakLanjut) throw errUpsertTindakLanjut;
+          }
+        }
       }
+
+      setHasilUploadRingkasan({
+        total: mappedRowItems.length,
+        sukses: jumlahSukses,
+        gagal: jumlahGagal
+      });
+      setUploadProgressStatus('selesai');
+      fetchDataMonitoringKantor();
+
+    } catch (err) {
+      console.error("❌ PROSES IMPOR GAGAL TOTAL:", err);
+      alert('Gagal mengimpor data anomali: ' + err.message);
+      setModalUploadReview(false);
+      setUploading(false);
     }
-  }
-
-  setHasilUploadRingkasan({
-
-    total:
-      mappedRowItems.length,
-
-    sukses:
-      jumlahSukses,
-
-    gagal:
-      jumlahGagal
-  });
-
-
-  setUploadProgressStatus(
-    'selesai'
-  );
-
-
-  await fetchDataMonitoringKantor();
-
-
-} catch (err) {
-
-  console.error(
-    '❌ PROSES IMPOR GAGAL TOTAL:',
-    err
-  );
-
-
-  alert(
-    'Gagal mengimpor data anomali: ' +
-    err.message
-  );
-
-
-  setModalUploadReview(false);
-
-  setUploading(false);
-}
-  }
+  };
 
   const handleBukaModalDetail = async (itemObj, namaKec) => {
     setSubjekFilterTab('siap_eksekusi');
@@ -1546,7 +1308,7 @@ const dataExcel = rawData.filter((row) => {
             {uploadProgressStatus === 'review_rows' && (
               <div className="space-y-4">
                 <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-xs text-amber-900 font-medium">
-                  💡 <strong>Informasi:</strong> Di bawah ini adalah daftar baris berkas Excel Anda. Sistem menandai anomali yang tidak lolos aturan otomatis dengan kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span>. Anda diwajibkan memilih manual melalui dropdown sebelum sinkronisasi dijalankan.
+                  💡 <strong>Informasi:</strong> Setiap sel <em>Daftar Anomali</em> yang berisi beberapa anomali otomatis dipecah menjadi beberapa item. Sistem menandai item yang tidak lolos aturan otomatis dengan kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span>. Semua ERR wajib dipilih manual sebelum sinkronisasi dijalankan.
                 </div>
 
                 <div className="overflow-x-auto border rounded-xl max-h-[50vh] bg-stone-50 shadow-inner">
