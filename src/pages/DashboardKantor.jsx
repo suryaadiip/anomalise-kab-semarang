@@ -928,7 +928,7 @@ export default function DashboardKantor() {
             <div className="flex items-baseline justify-between mt-1">
               <span className="text-3xl font-black text-orange-700 font-mono">{summaryMetrics.belumFasih}</span>
               <span className="text-xs font-black text-orange-955 bg-orange-200 px-1.5 py-0.5 rounded-sm font-mono">
-                {hitungPersen(summaryMetrics.belumFasih, summaryMetrics.sudahPcl)}
+                {hitungPersen(summaryMetrics.belumFasih, summaryMetrics.totalAnomali)}
               </span>
             </div>
             <span className="text-[10px] text-orange-900/70 font-medium mt-1 block">Belum tindak lanjut Fasih</span>
