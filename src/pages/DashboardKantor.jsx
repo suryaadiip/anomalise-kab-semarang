@@ -20,6 +20,39 @@ export default function DashboardKantor() {
     return new Date(stringTanggal).toLocaleDateString('id-ID', opsi);
   };
 
+  // Status FASIH pada rilis harian mengikuti status dari Excel (Kolom O).
+  // Data terbaru adalah sumber utama; histori snapshot lama tetap disimpan.
+  const normalisasiStatusFasihExcel = (nilai) => {
+    const teks = String(nilai ?? '')
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!teks || teks === '-' || teks === 'null') {
+      return 'Belum Tindak Lanjut FASIH';
+    }
+
+    // Cek kata negatif lebih dulu agar "belum ditindaklanjuti" tidak salah terbaca sebagai selesai.
+    if (teks.includes('belum') || teks.includes('tidak')) {
+      return 'Belum Tindak Lanjut FASIH';
+    }
+
+    if (
+      teks === 'sudah' ||
+      teks === 'selesai' ||
+      teks.includes('sudah ditindaklanjuti') ||
+      teks.includes('sudah ditindak lanjuti') ||
+      (teks.includes('sudah') && teks.includes('tindak'))
+    ) {
+      return 'Sudah Tindak Lanjut FASIH';
+    }
+
+    return 'Belum Tindak Lanjut FASIH';
+  };
+
   // Data State
   const [masterAnomali, setMasterAnomali] = useState([]);
   const [treeData, setTreeData] = useState([]);
@@ -65,7 +98,8 @@ export default function DashboardKantor() {
     kodedesa: '',
     sls: '',
     subsls: '',
-    link_fasih: ''
+    link_fasih: '',
+    status_fasih_excel: ''
   });
   const [subjekFilterTab, setSubjekFilterTab] = useState('siap_eksekusi');
 
@@ -348,7 +382,13 @@ export default function DashboardKantor() {
           kodedesa: tebakKolom(['kodedesa', 'kddesa', 'iddesa', 'desa']),
           sls: tebakKolom(['kodesls', 'kdsls', 'idsls', 'sls']),
           subsls: tebakKolom(['subsls', 'kdsubsls', 'sub_sls']),
-          link_fasih: tebakKolom(['linkfasih', 'link_fasih', 'urlfasih', 'tautan'])
+          link_fasih: tebakKolom(['linkfasih', 'link_fasih', 'urlfasih', 'tautan']),
+          // Utamakan nama header jika terdeteksi. Jika tidak, gunakan posisi Kolom O (index 14).
+          status_fasih_excel: tebakKolom([
+            'statustindaklanjut', 'status_tindak_lanjut', 'statustindaklanjutfasih',
+            'statusfasih', 'status_fasih', 'tindaklanjut', 'tindak_lanjut',
+            'statusperbaikan', 'statusanomali'
+          ]) || headersAsli[14] || ''
         });
 
         setRawExcelData(rawData);
@@ -364,8 +404,8 @@ export default function DashboardKantor() {
   };
 
   const handleProsesReviewBarisData = () => {
-    if (!columnMap.assignment_id || !columnMap.nama_subjek || !columnMap.nama_anomali) {
-      alert('Mohon petakan kolom minimal untuk ID Assignment, Nama Subjek, dan Nama Anomali!');
+    if (!columnMap.assignment_id || !columnMap.nama_subjek || !columnMap.nama_anomali || !columnMap.status_fasih_excel) {
+      alert('Mohon petakan kolom ID Assignment, Nama Subjek, Nama Anomali, dan Status Tindak Lanjut FASIH (Kolom O)!');
       return;
     }
 
@@ -418,6 +458,10 @@ export default function DashboardKantor() {
       const sls = slsRaw.trim().padStart(4, '0');
       const subSls = subSlsRaw.trim().padStart(2, '0');
       const generatedIdSubSls = `${desa}${sls}${subSls}`;
+      const statusFasihExcelRaw = columnMap.status_fasih_excel
+        ? row[columnMap.status_fasih_excel]
+        : '';
+      const statusFasihExcel = normalisasiStatusFasihExcel(statusFasihExcelRaw);
 
       return {
         id_lokal: index,
@@ -426,7 +470,9 @@ export default function DashboardKantor() {
         nama_subjek: row[columnMap.nama_subjek] || 'Tanpa Nama',
         teks_anomali_asli: String(namaAnomaliRaw), 
         kode_anomali: kodeAnomali,
-        link_fasih: columnMap.link_fasih ? (row[columnMap.link_fasih] || '') : ''
+        link_fasih: columnMap.link_fasih ? (row[columnMap.link_fasih] || '') : '',
+        status_fasih_excel_raw: String(statusFasihExcelRaw ?? ''),
+        status_fasih_excel: statusFasihExcel
       };
     });
 
@@ -472,6 +518,7 @@ export default function DashboardKantor() {
       let jumlahGagal = 0;
 
       const petaCatatanRiwayat = {};
+      const petaStatusFasihExcel = {};
       const setKunciUnikImpor = new Set(); 
 
       const formattedDataRaw = mappedRowItems.map((item) => {
@@ -500,6 +547,9 @@ export default function DashboardKantor() {
           );
 
           const keyGabung = `${String(item.assignment_id).trim()}_${String(item.kode_anomali).trim()}_${namaSubjekBersih.toLowerCase()}`;
+
+          // Status FASIH snapshot terbaru berasal dari rilis Excel terbaru, bukan di-reset otomatis.
+          petaStatusFasihExcel[keyGabung] = item.status_fasih_excel || 'Belum Tindak Lanjut FASIH';
 
           if (jejakMasaLalu) {
             petaCatatanRiwayat[keyGabung] = jejakMasaLalu;
@@ -549,6 +599,7 @@ export default function DashboardKantor() {
           dataBaruDisisipkan.forEach((barisBaru) => {
             const keyCari = `${String(barisBaru.assignment_id).trim()}_${String(barisBaru.kode_anomali).trim()}_${String(barisBaru.nama_subjek).trim().toLowerCase()}`;
             const dataLamaDitemukan = petaCatatanRiwayat[keyCari];
+            const statusFasihDariExcel = petaStatusFasihExcel[keyCari] || 'Belum Tindak Lanjut FASIH';
 
             if (dataLamaDitemukan) {
               payloadTindakLanjut.push({
@@ -561,7 +612,7 @@ export default function DashboardKantor() {
                 catatan_pegawai: null,
                 diperiksa_oleh_email: null,
                 tanggal_periksa: null,
-                status_fasih: 'Belum Tindak Lanjut FASIH',
+                status_fasih: statusFasihDariExcel,
                 dieksekusi_oleh_email: null,
                 waktu_eksekusi_fasih: null
               });
@@ -573,7 +624,7 @@ export default function DashboardKantor() {
                 dkonfirmasi_oleh_email: null,
                 tanggal_konfirmasi: null,
                 status_monitoring: 'Belum Diperiksa',
-                status_fasih: 'Belum Tindak Lanjut FASIH'
+                status_fasih: statusFasihDariExcel
               });
             }
           });
@@ -591,7 +642,9 @@ export default function DashboardKantor() {
       setHasilUploadRingkasan({
         total: mappedRowItems.length,
         sukses: jumlahSukses,
-        gagal: jumlahGagal
+        gagal: jumlahGagal,
+        sudahFasihExcel: mappedRowItems.filter(item => item.status_fasih_excel === 'Sudah Tindak Lanjut FASIH').length,
+        belumFasihExcel: mappedRowItems.filter(item => item.status_fasih_excel !== 'Sudah Tindak Lanjut FASIH').length
       });
       setUploadProgressStatus('selesai');
       fetchDataMonitoringKantor();
@@ -881,7 +934,7 @@ export default function DashboardKantor() {
               className="bg-stone-100 font-bold border border-stone-300 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-amber-600 cursor-pointer"
             >
               <option value="terakhir">🌟 Anomali Terakhir ({availableSnapshots[0] ? formatTanggalIndo(availableSnapshots[0]) : '-'})</option>
-              <option value="semua">📚 Semua Anomali (Akumulasi)</option>
+              <option value="semua">📚 Riwayat Semua Snapshot (Akumulasi)</option>
               <optgroup label="-- Riwayat Snapshot Anomali --">
                 {availableSnapshots.map(tgl => (
                   <option key={tgl} value={tgl}>
@@ -891,6 +944,17 @@ export default function DashboardKantor() {
               </optgroup>
             </select>
           </div>
+        </div>
+
+        {/* INFO SUMBER DATA AKTIF */}
+        <div className="bg-sky-50 border border-sky-200 rounded-xl px-4 py-3 text-xs text-sky-900 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <span className="font-black">ℹ️ Data aktif menggunakan rilis terbaru.</span>
+            <span className="ml-1 font-medium">Setiap rilis Excel baru menjadi dasar total monitoring; snapshot lama tetap tersimpan sebagai riwayat.</span>
+          </div>
+          <span className="font-mono font-bold whitespace-nowrap">
+            Rilis aktif: {availableSnapshots[0] ? formatTanggalIndo(availableSnapshots[0]) : '-'}
+          </span>
         </div>
 
         {/* WIDGET KPI GLOBAL */}
@@ -1196,6 +1260,7 @@ export default function DashboardKantor() {
                       { label: '🗺️ Kode SLS (4 Digit)', field: 'sls' },
                       { label: '🌿 Kode Sub-SLS (2 Digit)', field: 'subsls' },
                       { label: '🔗 Tautan Dokumen FASIH', field: 'link_fasih' },
+                      { label: '✅ Status Tindak Lanjut FASIH (Kolom O) *', field: 'status_fasih_excel' },
                     ].map((item) => (
                       <div key={item.field} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-stone-50 p-2 rounded-lg border border-stone-200">
                         <label className="text-xs font-semibold text-slate-700 w-full sm:w-[45%]">{item.label}</label>
@@ -1236,7 +1301,7 @@ export default function DashboardKantor() {
             {uploadProgressStatus === 'review_rows' && (
               <div className="space-y-4">
                 <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-xs text-amber-900 font-medium">
-                  💡 <strong>Informasi:</strong> Di bawah ini adalah daftar baris berkas Excel Anda. Sistem menandai anomali yang tidak lolos aturan otomatis dengan kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span>. Anda diwajibkan memilih manual melalui dropdown sebelum sinkronisasi dijalankan.
+                  💡 <strong>Informasi:</strong> Data terbaru menjadi dasar dashboard. Status FASIH dibaca dari <strong>{columnMap.status_fasih_excel}</strong> (Kolom O). Baris dengan status "Sudah Ditindaklanjuti" akan masuk <strong>Sudah Tindak Lanjut FASIH</strong>; selain itu masuk <strong>Belum Tindak Lanjut FASIH</strong>. Kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span> tetap wajib dipetakan manual.
                 </div>
 
                 <div className="overflow-x-auto border rounded-xl max-h-[50vh] bg-stone-50 shadow-inner">
@@ -1248,7 +1313,8 @@ export default function DashboardKantor() {
                         <th className="p-2.5 w-[40%] bg-amber-100/30">
                           Teks Kolom Excel Asli (<span className="underline italic">{columnMap.nama_anomali}</span>)
                         </th>
-                        <th className="p-2.5 w-[30%]">Aturan / Kode Dipetakan</th>
+                        <th className="p-2.5 w-[25%]">Aturan / Kode Dipetakan</th>
+                        <th className="p-2.5 w-[20%]">Status FASIH Excel</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-200 bg-white">
@@ -1277,6 +1343,18 @@ export default function DashboardKantor() {
                                   </option>
                                 ))}
                               </select>
+                            </td>
+                            <td className="p-2.5">
+                              <span className={`inline-flex px-2 py-1 rounded-md text-[10px] font-black ${
+                                item.status_fasih_excel === 'Sudah Tindak Lanjut FASIH'
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                  : 'bg-orange-100 text-orange-800 border border-orange-200'
+                              }`}>
+                                {item.status_fasih_excel}
+                              </span>
+                              <span className="block mt-1 text-[9px] text-stone-400 font-medium break-words">
+                                Excel: {item.status_fasih_excel_raw || '(kosong)'}
+                              </span>
                             </td>
                           </tr>
                         );
@@ -1324,6 +1402,17 @@ export default function DashboardKantor() {
                   <div className="bg-rose-50 border border-rose-200 p-3 rounded-xl shadow-3xs">
                     <span className="text-[10px] text-rose-800 font-bold uppercase block tracking-wide">Gagal / Format Error</span>
                     <span className="text-2xl font-black text-rose-700 font-mono block mt-1">{hasilUploadRingkasan.gagal}</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 text-center">
+                  <div className="bg-emerald-50 border border-emerald-200 p-2.5 rounded-xl">
+                    <span className="text-[9px] text-emerald-800 font-bold uppercase block">Sudah FASIH dari Excel</span>
+                    <span className="text-lg font-black text-emerald-700 font-mono">{hasilUploadRingkasan.sudahFasihExcel}</span>
+                  </div>
+                  <div className="bg-orange-50 border border-orange-200 p-2.5 rounded-xl">
+                    <span className="text-[9px] text-orange-800 font-bold uppercase block">Belum FASIH dari Excel</span>
+                    <span className="text-lg font-black text-orange-700 font-mono">{hasilUploadRingkasan.belumFasihExcel}</span>
                   </div>
                 </div>
 
