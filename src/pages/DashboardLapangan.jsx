@@ -92,11 +92,21 @@ export default function DashboardLapangan() {
       const { data, error } = await query;
       if (error) throw error;
 
-      const dbRows = data || [];
+      // Simpan daftar snapshot dari seluruh data agar pilihan "Anomali Terakhir"
+      // tetap mengacu ke rilis terbaru, meskipun semua anomali pada rilis itu sudah FASIH.
+      const semuaRows = data || [];
+
+      // PML dan PCL hanya menampilkan anomali yang BELUM ditindaklanjuti di FASIH.
+      // Data yang sudah berstatus "Sudah Tindak Lanjut FASIH" tidak masuk workspace lapangan.
+      const dbRows = semuaRows.filter(
+        item => String(item.status_fasih || '').trim() === 'Belum Tindak Lanjut FASIH'
+      );
+
       setRawMonitoringData(dbRows);
 
-      // Ekstrak daftar tanggal snapshot yang unik
-      const daftarTanggal = [...new Set(dbRows.map(item => item.tanggal_snapshot))]
+      // Daftar tanggal tetap diambil dari seluruh data (bukan hanya data yang belum FASIH)
+      // supaya snapshot terbaru tidak bergeser ke tanggal lama.
+      const daftarTanggal = [...new Set(semuaRows.map(item => item.tanggal_snapshot))]
         .filter(Boolean)
         .sort((a, b) => b.localeCompare(a));
 
