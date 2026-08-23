@@ -182,8 +182,11 @@ export default function DashboardLapangan() {
         };
       });
 
-      mappedPcl.sort((a, b) => b.belumSelesai - a.belumSelesai);
-      setDaftarPclAgregat(mappedPcl);
+      // Hanya tampilkan PCL yang masih memiliki anomali Belum Tindak Lanjut FASIH
+      const pclMasihAdaBelumFasih = mappedPcl.filter(pcl => pcl.totalBeban > 0);
+
+      pclMasihAdaBelumFasih.sort((a, b) => b.belumSelesai - a.belumSelesai);
+      setDaftarPclAgregat(pclMasihAdaBelumFasih);
     };
 
     hitungPcl();
@@ -222,8 +225,11 @@ export default function DashboardLapangan() {
         };
       });
 
-      slsMapped.sort((a, b) => b.belumSelesai - a.belumSelesai);
-      setDaftarSls(slsMapped);
+      // Hanya tampilkan SLS yang masih memiliki anomali Belum Tindak Lanjut FASIH
+      const slsMasihAdaBelumFasih = slsMapped.filter(sls => sls.totalAnomali > 0);
+
+      slsMasihAdaBelumFasih.sort((a, b) => b.belumSelesai - a.belumSelesai);
+      setDaftarSls(slsMasihAdaBelumFasih);
     };
 
     hitungSls();
