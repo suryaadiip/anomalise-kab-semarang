@@ -99,8 +99,12 @@ export default function DashboardLapangan() {
       // PML dan PCL hanya menampilkan anomali yang BELUM ditindaklanjuti di FASIH.
       // Data yang sudah berstatus "Sudah Tindak Lanjut FASIH" tidak masuk workspace lapangan.
       const dbRows = semuaRows.filter(
-        item => String(item.status_fasih || '').trim() === 'Belum Tindak Lanjut FASIH'
-      );
+  item =>
+    String(item.status_fasih || '').trim() ===
+      'Belum Tindak Lanjut FASIH' &&
+    String(item.status_konfirmasi || '').trim() ===
+      'Belum Tindak Lanjut'
+);
 
       setRawMonitoringData(dbRows);
 
