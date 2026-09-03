@@ -504,15 +504,67 @@ export default function DashboardKantor() {
     setUploadProgressStatus('mengirim');
 
     try {
-      const { data: historiLengkap } = await supabaseData
-        .from('view_monitoring_anomali')
-        .select('assignment_id, kode_anomali, nama_subjek, tanggal_snapshot, status_konfirmasi, catatan_lapangan, dkonfirmasi_oleh_email, tanggal_konfirmasi')
-        .not('catatan_lapangan', 'is', null);
+   
+const fetchSemuaHalaman = async (buatQuery) => {
+  const pageSize = 1000;
+  let from = 0;
+  let hasilSemua = [];
 
-      const { data: dataMenggantung } = await supabaseData
-        .from('view_monitoring_anomali')
-        .select('assignment_id, kode_anomali, nama_subjek, pertama_muncul_pada')
-        .not('status_fasih', 'eq', 'Sudah Tindak Lanjut FASIH');
+  while (true) {
+    const { data, error } = await buatQuery()
+      .range(from, from + pageSize - 1);
+
+    if (error) throw error;
+
+    const rows = data || [];
+    hasilSemua.push(...rows);
+
+    if (rows.length < pageSize) {
+      break;
+    }
+
+    from += pageSize;
+  }
+
+  return hasilSemua;
+};
+
+const historiLengkap = await fetchSemuaHalaman(() =>
+  supabaseData
+    .from('view_monitoring_anomali')
+    .select(`
+      anomali_id,
+      assignment_id,
+      kode_anomali,
+      nama_subjek,
+      tanggal_snapshot,
+      status_konfirmasi,
+      catatan_lapangan,
+      dkonfirmasi_oleh_email,
+      tanggal_konfirmasi
+    `)
+    .not('catatan_lapangan', 'is', null)
+    .lt('tanggal_snapshot', pilihanTanggalSnapshot)
+    .order('tanggal_snapshot', { ascending: false })
+    .order('anomali_id', { ascending: false })
+);
+
+const dataMenggantung = await fetchSemuaHalaman(() =>
+  supabaseData
+    .from('view_monitoring_anomali')
+    .select(`
+      anomali_id,
+      assignment_id,
+      kode_anomali,
+      nama_subjek,
+      pertama_muncul_pada,
+      tanggal_snapshot
+    `)
+    .not('status_fasih', 'eq', 'Sudah Tindak Lanjut FASIH')
+    .lt('tanggal_snapshot', pilihanTanggalSnapshot)
+    .order('tanggal_snapshot', { ascending: false })
+    .order('anomali_id', { ascending: false })
+);
 
       let jumlahSukses = 0;
       let jumlahGagal = 0;
