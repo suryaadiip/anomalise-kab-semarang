@@ -108,6 +108,16 @@ export default function DashboardKantor() {
     totalAnomali: 0, sudahPcl: 0, belumPcl: 0, sudahFasih: 0, belumFasih: 0
   });
 
+
+  // QUERY DETAIL STATUS FASIH PER ANOMALI (arahan mentor)
+  const [filterFasihDetail, setFilterFasihDetail] = useState('belum'); // semua | belum | sudah
+  const [dataFasihDetail, setDataFasihDetail] = useState([]);
+  const [loadingFasihDetail, setLoadingFasihDetail] = useState(false);
+  const [errorFasihDetail, setErrorFasihDetail] = useState('');
+  const [cariFasihDetail, setCariFasihDetail] = useState('');
+  const [halamanFasihDetail, setHalamanFasihDetail] = useState(1);
+  const DETAIL_PER_HALAMAN = 50;
+
   const getInfoAnomali = (kode, tipe = 'deskripsi') => {
     const target = masterAnomali.find(a => a.kode === kode);
     if (!target) return kode;
@@ -125,6 +135,96 @@ export default function DashboardKantor() {
       console.table(data || []);
     } catch (err) {
       console.error('Gagal memuat aturan master anomali:', err.message);
+    }
+  };
+
+
+  // Membaca status FASIH setiap anomali dari view_monitoring_anomali.
+  // Satu tabel detail selalu memakai SATU snapshot agar histori tidak tercampur.
+  // Jika filter dashboard = "semua", tabel detail tetap memakai snapshot terbaru.
+  const fetchDetailStatusFasih = async () => {
+    const snapshotTarget =
+      selectedSnapshot === 'terakhir' || selectedSnapshot === 'semua'
+        ? availableSnapshots[0]
+        : selectedSnapshot;
+
+    if (!snapshotTarget) {
+      setDataFasihDetail([]);
+      return;
+    }
+
+    setLoadingFasihDetail(true);
+    setErrorFasihDetail('');
+
+    try {
+      const pageSize = 1000;
+      let from = 0;
+      let semuaBaris = [];
+
+      while (true) {
+        let query = supabaseData
+          .from('view_monitoring_anomali')
+          .select(`
+            anomali_id,
+            tanggal_snapshot,
+            kdkec,
+            nmkec,
+            nmdesa,
+            nmsls,
+            nama_pml,
+            pml_email,
+            nama_pcl,
+            pcl_email,
+            idsubsls,
+            assignment_id,
+            nama_subjek,
+            kode_anomali,
+            status_konfirmasi,
+            status_fasih,
+            link_fasih,
+            tipe_masalah
+          `)
+          .eq('tanggal_snapshot', snapshotTarget)
+          .order('kdkec', { ascending: true })
+          .order('nama_pcl', { ascending: true })
+          .order('nama_subjek', { ascending: true })
+          .order('kode_anomali', { ascending: true })
+          .order('anomali_id', { ascending: true });
+
+        // Filter dilakukan di database agar tombol "Belum" tidak perlu
+        // menarik ribuan baris yang sudah selesai.
+        if (filterFasihDetail === 'belum') {
+          query = query.or(
+            'status_fasih.is.null,status_fasih.neq."Sudah Tindak Lanjut FASIH"'
+          );
+        } else if (filterFasihDetail === 'sudah') {
+          query = query.eq('status_fasih', 'Sudah Tindak Lanjut FASIH');
+        }
+
+        const { data, error } = await query.range(from, from + pageSize - 1);
+        if (error) throw error;
+
+        const batch = data || [];
+        semuaBaris.push(...batch);
+
+        if (batch.length < pageSize) break;
+        from += pageSize;
+      }
+
+      // tipe_masalah lama bisa NULL; NULL diperlakukan sebagai ANOMALI
+      // supaya data lama tidak hilang dari hasil query.
+      const sesuaiTab = semuaBaris.filter(
+        item => (item.tipe_masalah || 'ANOMALI') === mainMasalahTab
+      );
+
+      setDataFasihDetail(sesuaiTab);
+      setHalamanFasihDetail(1);
+    } catch (err) {
+      console.error('Gagal query detail status FASIH:', err);
+      setDataFasihDetail([]);
+      setErrorFasihDetail(err?.message || String(err));
+    } finally {
+      setLoadingFasihDetail(false);
     }
   };
 
@@ -231,6 +331,18 @@ export default function DashboardKantor() {
       filterDanProsesDataLokal(rawViewData, mainMasalahTab, selectedSnapshot);
     }
   }, [mainMasalahTab, selectedSnapshot, rawViewData]);
+
+
+  // Query detail otomatis mengikuti tab, snapshot, dan filter status FASIH.
+  useEffect(() => {
+    if (availableSnapshots.length > 0) {
+      fetchDetailStatusFasih();
+    }
+  }, [availableSnapshots, selectedSnapshot, mainMasalahTab, filterFasihDetail]);
+
+  useEffect(() => {
+    setHalamanFasihDetail(1);
+  }, [cariFasihDetail]);
 
   useEffect(() => {
     const siapkanDataAwal = async () => {
@@ -409,46 +521,62 @@ export default function DashboardKantor() {
       return;
     }
 
-    const itemHasilOlahan = rawExcelData.map((row, index) => {
+    const normalisasiTeks = (nilai) =>
+      String(nilai ?? '')
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    // Kolom N pada rilis mikro adalah data GROUPED: satu baris dapat memuat
+    // beberapa anomali sekaligus. Pecah berdasarkan penanda "Anomali Keluarga/Usaha N".
+    const pecahDaftarAnomali = (nilai) => {
+      const teks = String(nilai ?? '').trim();
+      if (!teks) return [];
+
+      const regexPenanda = /Anomali\s+(Keluarga|Usaha)\s+(\d+)\s*\(/gi;
+      const semuaPenanda = [...teks.matchAll(regexPenanda)];
+
+      // Fallback untuk format lama yang tidak memiliki penanda standar.
+      if (semuaPenanda.length === 0) {
+        return [{ teks, jenis: null, nomor: null }];
+      }
+
+      return semuaPenanda.map((match, urutan) => {
+        const mulai = match.index ?? 0;
+        const selesai = urutan + 1 < semuaPenanda.length
+          ? (semuaPenanda[urutan + 1].index ?? teks.length)
+          : teks.length;
+
+        return {
+          teks: teks.slice(mulai, selesai).replace(/,\s*$/, '').trim(),
+          jenis: String(match[1] || '').toUpperCase(),
+          nomor: Number(match[2])
+        };
+      });
+    };
+
+    // Penomoran master SIMALI:
+    //   Anomali Usaha 1-8    -> A01-A08
+    //   Anomali Keluarga 1-6 -> A09-A14
+    // Ini lebih aman daripada keyword umum seperti "Usaha Menengah dan Besar"
+    // yang dapat membuat Usaha 7 terbaca sebagai A06.
+    const kodeDariLabelSumber = (jenis, nomor) => {
+      if (jenis === 'USAHA' && nomor >= 1 && nomor <= 8) {
+        return `A${String(nomor).padStart(2, '0')}`;
+      }
+      if (jenis === 'KELUARGA' && nomor >= 1 && nomor <= 6) {
+        return `A${String(nomor + 8).padStart(2, '0')}`;
+      }
+      return null;
+    };
+
+    const itemHasilOlahan = rawExcelData.flatMap((row, index) => {
       const namaAnomaliRaw = row[columnMap.nama_anomali] || '';
-
-      const normalisasiTeks = (nilai) =>
-        String(nilai ?? '')
-          .toLowerCase()
-          .normalize('NFKD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/[\r\n\t]+/g, ' ')
-          .replace(/[^a-z0-9]+/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-      const teksNormal = normalisasiTeks(namaAnomaliRaw);
-
-      const aturanCocok = masterAnomali.find((aturan) => {
-        const deskripsiNormal = normalisasiTeks(aturan.deskripsi);
-
-        if (deskripsiNormal && teksNormal.includes(deskripsiNormal)) {
-          return true;
-        }
-
-        const daftarKataKunci = String(aturan.kata_kunci || '')
-          .split(',')
-          .map((kata) => normalisasiTeks(kata))
-          .filter(Boolean);
-
-        return daftarKataKunci.some((kataKunci) =>
-          teksNormal.includes(kataKunci)
-        );
-      });
-
-      const kodeAnomali = aturanCocok ? aturanCocok.kode : 'ERR';
-
-      console.log('MATCH ANOMALI:', {
-        teks_excel: namaAnomaliRaw,
-        master_kode: aturanCocok?.kode || 'ERR',
-        master_deskripsi: aturanCocok?.deskripsi || null,
-        master_kata_kunci: aturanCocok?.kata_kunci || null
-      });
+      const daftarAnomali = pecahDaftarAnomali(namaAnomaliRaw);
 
       const desaRaw = columnMap.kodedesa ? String(row[columnMap.kodedesa] || '') : '';
       const slsRaw = columnMap.sls ? String(row[columnMap.sls] || '') : '';
@@ -463,22 +591,75 @@ export default function DashboardKantor() {
         : '';
       const statusFasihExcel = normalisasiStatusFasihExcel(statusFasihExcelRaw);
 
-      return {
-        id_lokal: index,
-        idsubsls: generatedIdSubSls,
-        assignment_id: String(row[columnMap.assignment_id] || `GEN-${Date.now()}-${index}`),
-        nama_subjek: row[columnMap.nama_subjek] || 'Tanpa Nama',
-        teks_anomali_asli: String(namaAnomaliRaw), 
-        kode_anomali: kodeAnomali,
-        link_fasih: columnMap.link_fasih ? (row[columnMap.link_fasih] || '') : '',
-        status_fasih_excel_raw: String(statusFasihExcelRaw ?? ''),
-        status_fasih_excel: statusFasihExcel
-      };
+      // Jika kolom anomali kosong, tetap kirim satu ERR agar terlihat di review.
+      const daftarUntukDiproses = daftarAnomali.length > 0
+        ? daftarAnomali
+        : [{ teks: String(namaAnomaliRaw), jenis: null, nomor: null }];
+
+      return daftarUntukDiproses.map((anomaliTerpisah, subIndex) => {
+        const teksAnomali = anomaliTerpisah.teks;
+        const kodeLangsung = kodeDariLabelSumber(
+          anomaliTerpisah.jenis,
+          anomaliTerpisah.nomor
+        );
+
+        // Prioritaskan kode eksplisit dari label sumber. Untuk format lama,
+        // baru gunakan pencocokan deskripsi/kata kunci sebagai fallback.
+        let aturanCocok = kodeLangsung
+          ? masterAnomali.find(
+              aturan => String(aturan.kode).trim().toUpperCase() === kodeLangsung
+            )
+          : null;
+
+        if (!aturanCocok) {
+          const teksNormal = normalisasiTeks(teksAnomali);
+          aturanCocok = masterAnomali.find((aturan) => {
+            const deskripsiNormal = normalisasiTeks(aturan.deskripsi);
+
+            if (deskripsiNormal && teksNormal.includes(deskripsiNormal)) {
+              return true;
+            }
+
+            const daftarKataKunci = String(aturan.kata_kunci || '')
+              .split(',')
+              .map((kata) => normalisasiTeks(kata))
+              .filter(Boolean);
+
+            return daftarKataKunci.some((kataKunci) =>
+              teksNormal.includes(kataKunci)
+            );
+          });
+        }
+
+        const kodeAnomali = aturanCocok?.kode || kodeLangsung || 'ERR';
+
+        console.log('MATCH ANOMALI TERPISAH:', {
+          baris_excel: index + 1,
+          teks_excel: teksAnomali,
+          jenis_sumber: anomaliTerpisah.jenis,
+          nomor_sumber: anomaliTerpisah.nomor,
+          kode_langsung: kodeLangsung,
+          master_kode: aturanCocok?.kode || 'ERR',
+          master_deskripsi: aturanCocok?.deskripsi || null
+        });
+
+        return {
+          id_lokal: `${index}-${subIndex}`,
+          idsubsls: generatedIdSubSls,
+          assignment_id: String(row[columnMap.assignment_id] || `GEN-${Date.now()}-${index}`),
+          nama_subjek: row[columnMap.nama_subjek] || 'Tanpa Nama',
+          teks_anomali_asli: teksAnomali,
+          kode_anomali: kodeAnomali,
+          link_fasih: columnMap.link_fasih ? (row[columnMap.link_fasih] || '') : '',
+          status_fasih_excel_raw: String(statusFasihExcelRaw ?? ''),
+          status_fasih_excel: statusFasihExcel
+        };
+      });
     });
 
-    console.log('✅ MODE IMPORT: 1 BARIS EXCEL = 1 RECORD ANOMALI');
+    console.log('✅ MODE IMPORT: 1 BARIS GROUPED -> BANYAK RECORD ANOMALI');
     console.log('✅ TOTAL BARIS EXCEL VALID:', rawExcelData.length);
-    console.log('✅ TOTAL ITEM REVIEW:', itemHasilOlahan.length);
+    console.log('✅ TOTAL ANOMALI HASIL PECAH:', itemHasilOlahan.length);
     console.log(
       '⚠️ TOTAL ITEM ERR:',
       itemHasilOlahan.filter(item => item.kode_anomali === 'ERR').length
@@ -504,67 +685,64 @@ export default function DashboardKantor() {
     setUploadProgressStatus('mengirim');
 
     try {
-   
-const fetchSemuaHalaman = async (buatQuery) => {
-  const pageSize = 1000;
-  let from = 0;
-  let hasilSemua = [];
+      // Ambil RIWAYAT secara pagination. Tanpa ini PostgREST bisa hanya
+      // mengembalikan sebagian data dan konfirmasi PCL lama gagal terbawa.
+      const fetchSemuaHalaman = async (buatQuery) => {
+        const pageSize = 1000;
+        let from = 0;
+        let hasilSemua = [];
 
-  while (true) {
-    const { data, error } = await buatQuery()
-      .range(from, from + pageSize - 1);
+        while (true) {
+          const { data, error } = await buatQuery()
+            .range(from, from + pageSize - 1);
 
-    if (error) throw error;
+          if (error) throw error;
 
-    const rows = data || [];
-    hasilSemua.push(...rows);
+          const rows = data || [];
+          hasilSemua.push(...rows);
 
-    if (rows.length < pageSize) {
-      break;
-    }
+          if (rows.length < pageSize) break;
+          from += pageSize;
+        }
+        return hasilSemua;
+      };
 
-    from += pageSize;
-  }
+      const historiLengkap = await fetchSemuaHalaman(() =>
+        supabaseData
+          .from('view_monitoring_anomali')
+          .select(`
+            anomali_id,
+            assignment_id,
+            kode_anomali,
+            nama_subjek,
+            tanggal_snapshot,
+            status_konfirmasi,
+            catatan_lapangan,
+            dkonfirmasi_oleh_email,
+            tanggal_konfirmasi
+          `)
+          .not('catatan_lapangan', 'is', null)
+          .lt('tanggal_snapshot', pilihanTanggalSnapshot)
+          .order('tanggal_snapshot', { ascending: false })
+          .order('anomali_id', { ascending: false })
+      );
 
-  return hasilSemua;
-};
-
-const historiLengkap = await fetchSemuaHalaman(() =>
-  supabaseData
-    .from('view_monitoring_anomali')
-    .select(`
-      anomali_id,
-      assignment_id,
-      kode_anomali,
-      nama_subjek,
-      tanggal_snapshot,
-      status_konfirmasi,
-      catatan_lapangan,
-      dkonfirmasi_oleh_email,
-      tanggal_konfirmasi
-    `)
-    .not('catatan_lapangan', 'is', null)
-    .lt('tanggal_snapshot', pilihanTanggalSnapshot)
-    .order('tanggal_snapshot', { ascending: false })
-    .order('anomali_id', { ascending: false })
-);
-
-const dataMenggantung = await fetchSemuaHalaman(() =>
-  supabaseData
-    .from('view_monitoring_anomali')
-    .select(`
-      anomali_id,
-      assignment_id,
-      kode_anomali,
-      nama_subjek,
-      pertama_muncul_pada,
-      tanggal_snapshot
-    `)
-    .not('status_fasih', 'eq', 'Sudah Tindak Lanjut FASIH')
-    .lt('tanggal_snapshot', pilihanTanggalSnapshot)
-    .order('tanggal_snapshot', { ascending: false })
-    .order('anomali_id', { ascending: false })
-);
+      const dataMenggantung = await fetchSemuaHalaman(() =>
+        supabaseData
+          .from('view_monitoring_anomali')
+          .select(`
+            anomali_id,
+            assignment_id,
+            kode_anomali,
+            nama_subjek,
+            pertama_muncul_pada,
+            tanggal_snapshot
+          `)
+          .not('status_fasih', 'eq', 'Sudah Tindak Lanjut FASIH')
+          .lt('tanggal_snapshot', pilihanTanggalSnapshot)
+          .order('tanggal_snapshot', { ascending: false })
+          .order('anomali_id', { ascending: false })
+      );
 
       let jumlahSukses = 0;
       let jumlahGagal = 0;
@@ -732,13 +910,29 @@ const dataMenggantung = await fetchSemuaHalaman(() =>
 
       if (error) throw error;
 
-      const listAssignmentId = [...new Set(sampelTarget.map(s => s.assignment_id))];
-      const grupBerdasarkanSubjek = listAssignmentId.map(assignId => {
-        const semuaAnomaliSubjek = sampelTarget.filter(raw => raw.assignment_id === assignId);
+      // Satu assignment dapat berisi lebih dari satu subjek/responden.
+      // Karena itu grouping wajib memakai assignment_id + nama_subjek.
+      const daftarKunciSubjek = [
+        ...new Map(
+          sampelTarget.map(s => [
+            `${String(s.assignment_id)}|||${String(s.nama_subjek || '').trim().toLowerCase()}`,
+            {
+              assignment_id: s.assignment_id,
+              nama_subjek: String(s.nama_subjek || '').trim()
+            }
+          ])
+        ).values()
+      ];
+
+      const grupBerdasarkanSubjek = daftarKunciSubjek.map(kunci => {
+        const semuaAnomaliSubjek = sampelTarget.filter(raw =>
+          raw.assignment_id === kunci.assignment_id &&
+          String(raw.nama_subjek || '').trim().toLowerCase() === kunci.nama_subjek.toLowerCase()
+        );
         const profilUtama = semuaAnomaliSubjek[0];
 
         return {
-          assignment_id: assignId,
+          assignment_id: kunci.assignment_id,
           nama_subjek: profilUtama.nama_subjek,
           nmdesa: profilUtama.nmdesa,
           nmsls: profilUtama.nmsls,
@@ -788,11 +982,15 @@ const dataMenggantung = await fetchSemuaHalaman(() =>
       const assignIdIdem = targetSubjek.assignment_id;
       const kodeAnomaliIdem = detailAnomaliTarget.kode;
 
+      // Hanya ubah anomali pada SUBJEK + SNAPSHOT yang sedang dibuka.
+      // Jangan mengubah histori snapshot lama dengan assignment/kode yang sama.
       const { data: daftarKembar, error: errCari } = await supabaseData
         .from('view_monitoring_anomali')
         .select('anomali_id')
         .eq('assignment_id', assignIdIdem)
-        .eq('kode_anomali', kodeAnomaliIdem);
+        .eq('nama_subjek', targetSubjek.nama_subjek)
+        .eq('kode_anomali', kodeAnomaliIdem)
+        .eq('tanggal_snapshot', modalDetailObj.tglSnapshot);
 
       if (errCari) throw errCari;
 
@@ -824,7 +1022,11 @@ const dataMenggantung = await fetchSemuaHalaman(() =>
         return {
           ...prev,
           daftarSubjek: prev.daftarSubjek.map(subjek => {
-            if (subjek.assignment_id === assignIdIdem) {
+            if (
+              subjek.assignment_id === assignIdIdem &&
+              String(subjek.nama_subjek || '').trim().toLowerCase() ===
+                String(targetSubjek.nama_subjek || '').trim().toLowerCase()
+            ) {
               return {
                 ...subjek,
                 detailAnomali: subjek.detailAnomali.map(anomali => {
@@ -847,6 +1049,10 @@ const dataMenggantung = await fetchSemuaHalaman(() =>
         }
         return row;
       }));
+
+      // Sinkronkan kembali rekap dan tabel query per-anomali setelah update berhasil.
+      fetchDataMonitoringKantor();
+      fetchDetailStatusFasih();
 
     } catch (err) {
       alert('Gagal memperbarui status: ' + err.message);
@@ -917,6 +1123,68 @@ const dataMenggantung = await fetchSemuaHalaman(() =>
     if (!aSiapAtauBaruSelesai && bSiapAtauBaruSelesai) return 1;
     return 0;
   });
+
+
+  const snapshotDetailAktif =
+    selectedSnapshot === 'terakhir' || selectedSnapshot === 'semua'
+      ? availableSnapshots[0]
+      : selectedSnapshot;
+
+  // KPI khusus panel detail agar jumlah tombol tetap sesuai snapshot query,
+  // termasuk saat dashboard utama sedang memilih "Riwayat Semua Snapshot".
+  const agregatUntukDetail = rawViewData.filter(item =>
+    (item.tipe_masalah || 'ANOMALI') === mainMasalahTab &&
+    item.tanggal_snapshot === snapshotDetailAktif
+  );
+
+  const detailMetrics = agregatUntukDetail.reduce(
+    (acc, item) => {
+      acc.total += Number(item.total_rows || 0);
+      acc.sudah += Number(item.sudah_fasih || 0);
+      acc.belum += Number(item.belum_fasih || 0);
+      return acc;
+    },
+    { total: 0, sudah: 0, belum: 0 }
+  );
+
+  const kataCariFasih = cariFasihDetail.trim().toLowerCase();
+  const dataFasihDetailTersaring = dataFasihDetail.filter(item => {
+    if (!kataCariFasih) return true;
+
+    return [
+      item.kdkec,
+      item.nmkec,
+      item.nmdesa,
+      item.nmsls,
+      item.nama_pml,
+      item.pml_email,
+      item.nama_pcl,
+      item.pcl_email,
+      item.idsubsls,
+      item.assignment_id,
+      item.nama_subjek,
+      item.kode_anomali,
+      item.status_konfirmasi,
+      item.status_fasih
+    ]
+      .map(v => String(v ?? '').toLowerCase())
+      .some(v => v.includes(kataCariFasih));
+  });
+
+  const totalHalamanFasihDetail = Math.max(
+    1,
+    Math.ceil(dataFasihDetailTersaring.length / DETAIL_PER_HALAMAN)
+  );
+
+  const halamanFasihAman = Math.min(
+    halamanFasihDetail,
+    totalHalamanFasihDetail
+  );
+
+  const dataFasihDetailHalaman = dataFasihDetailTersaring.slice(
+    (halamanFasihAman - 1) * DETAIL_PER_HALAMAN,
+    halamanFasihAman * DETAIL_PER_HALAMAN
+  );
 
   if (loading && masterAnomali.length === 0) {
     return (
@@ -1048,6 +1316,228 @@ const dataMenggantung = await fetchSemuaHalaman(() =>
               </span>
             </div>
             <span className="text-[10px] text-orange-900/70 font-medium mt-1 block">Belum tindak lanjut Fasih</span>
+          </div>
+        </div>
+
+        {/* QUERY DETAIL STATUS FASIH PER ANOMALI */}
+        <div className="bg-white rounded-xl border border-stone-200 shadow-2xs overflow-hidden">
+          <div className="p-4 border-b bg-gradient-to-r from-slate-50 to-stone-50 space-y-3">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-black text-slate-800">
+                  🔎 Query Status Tindak Lanjut FASIH per Anomali
+                </h2>
+                <p className="text-[11px] text-stone-500 mt-1">
+                  Setiap baris adalah satu data anomali. Status dibaca langsung dari <span className="font-mono font-bold">view_monitoring_anomali.status_fasih</span>.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFilterFasihDetail('semua')}
+                  className={`px-3 py-2 rounded-lg text-[11px] font-black border transition-colors ${
+                    filterFasihDetail === 'semua'
+                      ? 'bg-slate-800 text-white border-slate-800'
+                      : 'bg-white text-slate-600 border-stone-300 hover:bg-stone-50'
+                  }`}
+                >
+                  Semua ({detailMetrics.total})
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setFilterFasihDetail('belum')}
+                  className={`px-3 py-2 rounded-lg text-[11px] font-black border transition-colors ${
+                    filterFasihDetail === 'belum'
+                      ? 'bg-orange-600 text-white border-orange-600'
+                      : 'bg-white text-orange-700 border-orange-300 hover:bg-orange-50'
+                  }`}
+                >
+                  ❌ Belum FASIH ({detailMetrics.belum})
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setFilterFasihDetail('sudah')}
+                  className={`px-3 py-2 rounded-lg text-[11px] font-black border transition-colors ${
+                    filterFasihDetail === 'sudah'
+                      ? 'bg-emerald-600 text-white border-emerald-600'
+                      : 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
+                  }`}
+                >
+                  ✅ Sudah FASIH ({detailMetrics.sudah})
+                </button>
+
+                <button
+                  type="button"
+                  onClick={fetchDetailStatusFasih}
+                  disabled={loadingFasihDetail}
+                  className="px-3 py-2 rounded-lg text-[11px] font-black bg-white text-amber-800 border border-amber-300 hover:bg-amber-50 disabled:opacity-50"
+                >
+                  {loadingFasihDetail ? '⏳ Memuat...' : '🔄 Query Ulang'}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div className="text-[11px] text-slate-600">
+                Snapshot query: <span className="font-mono font-black text-slate-800">{snapshotDetailAktif || '-'}</span>
+                {selectedSnapshot === 'semua' && (
+                  <span className="ml-2 text-amber-700 font-bold">
+                    (mode riwayat dipilih; tabel detail tetap memakai snapshot terbaru agar histori tidak tercampur)
+                  </span>
+                )}
+              </div>
+
+              <input
+                type="text"
+                value={cariFasihDetail}
+                onChange={(e) => setCariFasihDetail(e.target.value)}
+                placeholder="Cari kecamatan, PCL, SLS, assignment, subjek, kode..."
+                className="w-full md:w-[420px] bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500"
+              />
+            </div>
+          </div>
+
+          {errorFasihDetail ? (
+            <div className="m-4 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800">
+              ❌ Query gagal: {errorFasihDetail}
+            </div>
+          ) : null}
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs min-w-[1400px]">
+              <thead>
+                <tr className="bg-stone-100 text-slate-600 font-black text-[10px] uppercase tracking-wider border-b">
+                  <th className="p-3 w-[55px] text-center">No</th>
+                  <th className="p-3 w-[155px]">Status FASIH</th>
+                  <th className="p-3 w-[170px]">Kecamatan</th>
+                  <th className="p-3 w-[220px]">PML / PCL</th>
+                  <th className="p-3 w-[175px]">ID Sub-SLS</th>
+                  <th className="p-3 w-[190px]">Assignment</th>
+                  <th className="p-3 min-w-[260px]">Nama Subjek / Responden</th>
+                  <th className="p-3 w-[85px] text-center">Kode</th>
+                  <th className="p-3 w-[190px]">Status PCL</th>
+                  <th className="p-3 w-[95px] text-center">FASIH</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-100">
+                {loadingFasihDetail ? (
+                  <tr>
+                    <td colSpan="10" className="p-8 text-center text-stone-500 font-bold">
+                      ⏳ Meng-query data anomali...
+                    </td>
+                  </tr>
+                ) : dataFasihDetailHalaman.length === 0 ? (
+                  <tr>
+                    <td colSpan="10" className="p-8 text-center text-stone-500">
+                      Tidak ada data yang sesuai filter.
+                    </td>
+                  </tr>
+                ) : (
+                  dataFasihDetailHalaman.map((item, index) => {
+                    const sudahFasih = item.status_fasih === 'Sudah Tindak Lanjut FASIH';
+                    const nomor = (halamanFasihAman - 1) * DETAIL_PER_HALAMAN + index + 1;
+
+                    return (
+                      <tr
+                        key={item.anomali_id}
+                        className={sudahFasih ? 'hover:bg-emerald-50/30' : 'bg-orange-50/20 hover:bg-orange-50/50'}
+                      >
+                        <td className="p-3 text-center font-mono text-stone-500">{nomor}</td>
+                        <td className="p-3">
+                          {sudahFasih ? (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md bg-emerald-100 text-emerald-800 font-black text-[10px] whitespace-nowrap">
+                              ✅ SUDAH DITINDAKLANJUTI
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md bg-orange-100 text-orange-800 font-black text-[10px] whitespace-nowrap">
+                              ❌ BELUM DITINDAKLANJUTI
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <div className="font-bold text-slate-800">[{item.kdkec || '-'}] {item.nmkec || '-'}</div>
+                          <div className="text-[10px] text-stone-500 mt-0.5">{item.nmdesa || '-'}</div>
+                        </td>
+                        <td className="p-3">
+                          <div className="text-[10px] text-stone-500">PML: <span className="font-bold text-slate-700">{item.nama_pml || '-'}</span></div>
+                          <div className="text-[11px] mt-1">PCL: <span className="font-black text-slate-800">{item.nama_pcl || item.pcl_email || '-'}</span></div>
+                        </td>
+                        <td className="p-3 font-mono text-[11px] text-slate-700">{item.idsubsls || '-'}</td>
+                        <td className="p-3 font-mono text-[10px] text-slate-600 break-all">{item.assignment_id || '-'}</td>
+                        <td className="p-3">
+                          <div className="font-bold text-slate-800">{item.nama_subjek || '-'}</div>
+                          {item.nmsls && <div className="text-[10px] text-stone-500 mt-1">SLS: {item.nmsls}</div>}
+                        </td>
+                        <td className="p-3 text-center">
+                          <span className="font-mono font-black px-2 py-1 bg-stone-100 rounded text-slate-800">{item.kode_anomali || '-'}</span>
+                        </td>
+                        <td className="p-3">
+                          <span className={`text-[10px] font-bold ${
+                            item.status_konfirmasi === 'Belum Tindak Lanjut'
+                              ? 'text-amber-700'
+                              : 'text-slate-700'
+                          }`}>
+                            {item.status_konfirmasi || 'Belum Tindak Lanjut'}
+                          </span>
+                        </td>
+                        <td className="p-3 text-center">
+                          {item.link_fasih ? (
+                            <a
+                              href={item.link_fasih}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex px-2 py-1 rounded-md bg-sky-50 border border-sky-200 text-sky-700 font-black text-[10px] hover:bg-sky-100"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              Buka ↗
+                            </a>
+                          ) : (
+                            <span className="text-stone-300">-</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="p-3 border-t bg-stone-50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-[11px]">
+            <div className="text-stone-600">
+              Hasil query: <strong>{dataFasihDetailTersaring.length}</strong> anomali
+              {dataFasihDetailTersaring.length > 0 && (
+                <span>
+                  {' '}• Menampilkan {((halamanFasihAman - 1) * DETAIL_PER_HALAMAN) + 1}
+                  {' '}- {Math.min(halamanFasihAman * DETAIL_PER_HALAMAN, dataFasihDetailTersaring.length)}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setHalamanFasihDetail(prev => Math.max(1, prev - 1))}
+                disabled={halamanFasihAman <= 1}
+                className="px-3 py-1.5 rounded-md border bg-white font-bold disabled:opacity-40"
+              >
+                ← Sebelumnya
+              </button>
+              <span className="font-mono font-black text-slate-700">
+                {halamanFasihAman} / {totalHalamanFasihDetail}
+              </span>
+              <button
+                type="button"
+                onClick={() => setHalamanFasihDetail(prev => Math.min(totalHalamanFasihDetail, prev + 1))}
+                disabled={halamanFasihAman >= totalHalamanFasihDetail}
+                className="px-3 py-1.5 rounded-md border bg-white font-bold disabled:opacity-40"
+              >
+                Berikutnya →
+              </button>
+            </div>
           </div>
         </div>
 
