@@ -44,6 +44,18 @@ export default function DashboardLapangan() {
     return tipe === 'deskripsi' ? target.deskripsi : target.aturan_teknis;
   };
 
+  const getKategoriDariKode = (kode) => {
+    const target = masterAnomali.find(
+      a => String(a.kode).trim().toUpperCase() === String(kode).trim().toUpperCase()
+    );
+    return String(target?.kategori || '').trim().toUpperCase();
+  };
+
+  const kategoriItem = (item) =>
+    String(item?.kategori_anomali || item?.kategori || getKategoriDariKode(item?.kode_anomali) || '')
+      .trim()
+      .toUpperCase();
+
   const fetchMasterAnomali = async () => {
   try {
     const { data, error } = await supabaseData
@@ -258,9 +270,10 @@ export default function DashboardLapangan() {
         };
       }
 
-      if (String(item.kode_anomali).startsWith('K')) {
+      const kategoriBaris = kategoriItem(item);
+      if (kategoriBaris === 'KELUARGA') {
         grupRuta[item.assignment_id].nama_keluarga_krt = item.nama_subjek;
-      } else if (String(item.kode_anomali).startsWith('U')) {
+      } else if (kategoriBaris === 'USAHA') {
         grupRuta[item.assignment_id].nama_unit_usaha = item.nama_subjek;
       }
 
@@ -645,8 +658,8 @@ export default function DashboardLapangan() {
 
                 if (errorTerfilter.length === 0) return null;
 
-                const anomaliKeluarga = errorTerfilter.filter(err => String(err.kode_anomali).startsWith('K'));
-                const anomaliUsaha = errorTerfilter.filter(err => String(err.kode_anomali).startsWith('U'));
+                const anomaliKeluarga = errorTerfilter.filter(err => kategoriItem(err) === 'KELUARGA');
+                const anomaliUsaha = errorTerfilter.filter(err => kategoriItem(err) === 'USAHA');
                 const modeBersarang = anomaliKeluarga.length > 0 && anomaliUsaha.length > 0;
                 const teksHeaderUtama = ruta.nama_keluarga_krt || ruta.fallback_nama;
 
@@ -672,7 +685,7 @@ export default function DashboardLapangan() {
                     <div className="p-3 space-y-3 divide-y divide-stone-100">
                       {errorTerfilter.map((err, i) => {
                         const isBelumTuntas = err.status_konfirmasi === 'Belum Tindak Lanjut';
-                        const isUsha = String(err.kode_anomali).startsWith('U');
+                        const isUsha = kategoriItem(err) === 'USAHA';
                         const teksKeterangan = getInfoAnomali(err.kode_anomali, 'deskripsi');
                         
                         const isMissingValue = (err.tipe_masalah === 'MISSING_VALUE') ||
@@ -852,7 +865,7 @@ export default function DashboardLapangan() {
               <div className="space-y-3 pt-2">
                 <h4 className="text-sm font-extrabold text-amber-800 uppercase tracking-wider flex items-center gap-1.5 border-b border-stone-100 pb-1.5">🏢 Anomali Usaha</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {masterAnomali.filter(a => String(a.kode).startsWith('U') && !a.deskripsi.toLowerCase().includes('kosong')).map(item => (
+                  {masterAnomali.filter(a => String(a.kategori || '').toUpperCase() === 'USAHA' && !a.deskripsi.toLowerCase().includes('kosong')).map(item => (
                     <div key={item.kode} className="bg-stone-50 p-3 rounded-xl border border-stone-200/60 space-y-1">
                       <span className="font-bold text-slate-900 block">{item.kode}. {item.deskripsi}</span>
                       <p className="text-[11px] text-slate-600">{item.aturan_teknis}</p>
@@ -864,7 +877,7 @@ export default function DashboardLapangan() {
               <div className="space-y-3 pt-2">
                 <h4 className="text-sm font-extrabold text-stone-800 uppercase tracking-wider flex items-center gap-1.5 border-b border-stone-100 pb-1.5">🧑 Anomali Keluarga</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {masterAnomali.filter(a => String(a.kode).startsWith('K') && !a.deskripsi.toLowerCase().includes('kosong')).map(item => (
+                  {masterAnomali.filter(a => String(a.kategori || '').toUpperCase() === 'KELUARGA' && !a.deskripsi.toLowerCase().includes('kosong')).map(item => (
                     <div key={item.kode} className="bg-stone-50 p-3 rounded-xl border border-stone-200/60 space-y-1">
                       <span className="font-bold text-slate-900 block">{item.kode}. {item.deskripsi}</span>
                       <p className="text-[11px] text-slate-600">{item.aturan_teknis}</p>

@@ -55,6 +55,7 @@ export default function DashboardKantor() {
 
   // Data State
   const [masterAnomali, setMasterAnomali] = useState([]);
+  const [masterAliasAnomali, setMasterAliasAnomali] = useState([]);
   const [treeData, setTreeData] = useState([]);
   const [copiedId, setCopiedId] = useState(null);
 
@@ -89,11 +90,22 @@ export default function DashboardKantor() {
   const [hasilUploadRingkasan, setHasilUploadRingkasan] = useState(null);
   const [excelHeaders, setExcelHeaders] = useState([]);
   const [mappedRowItems, setMappedRowItems] = useState([]);
+  const [importPreset, setImportPreset] = useState('UNIVERSAL'); // UNIVERSAL | UMUM_LAMA
+  const [selectedImportKode, setSelectedImportKode] = useState('');
+  const [detectedImportInfo, setDetectedImportInfo] = useState({
+    fileName: '',
+    subjectMode: 'UMUM',
+    warning: '',
+    suggestedKode: ''
+  });
 
   // State untuk menyimpan peta (mapping) pilihan user
   const [columnMap, setColumnMap] = useState({
+    idsubsls: '',
     assignment_id: '',
     nama_subjek: '',
+    nama_kk: '',
+    no_urut_kk: '',
     nama_anomali: '',
     kodedesa: '',
     sls: '',
@@ -116,7 +128,7 @@ export default function DashboardKantor() {
   const [errorFasihDetail, setErrorFasihDetail] = useState('');
   const [cariFasihDetail, setCariFasihDetail] = useState('');
   const [halamanFasihDetail, setHalamanFasihDetail] = useState(1);
-  const DETAIL_PER_HALAMAN = 50;
+  const DETAIL_PER_HALAMAN = 10;
 
   const getInfoAnomali = (kode, tipe = 'deskripsi') => {
     const target = masterAnomali.find(a => a.kode === kode);
@@ -130,9 +142,30 @@ export default function DashboardKantor() {
         .from('master_anomali')
         .select('kode, deskripsi, aturan_teknis, kata_kunci, kategori');
       if (error) throw error;
+
       setMasterAnomali(data || []);
       console.log('=== MASTER ANOMALI BERHASIL DIMUAT ===');
       console.table(data || []);
+
+      // Alias nama file disimpan di database agar penambahan kode anomali baru
+      // tidak lagi memerlukan perubahan DashboardKantor.jsx / redeploy frontend.
+      const { data: aliasData, error: aliasError } = await supabaseData
+        .from('master_alias_anomali')
+        .select('alias_file, kode_anomali, prioritas, aktif')
+        .eq('aktif', true)
+        .order('prioritas', { ascending: true });
+
+      if (aliasError) {
+        console.warn(
+          'Master alias anomali belum dapat dimuat. Deteksi kode dari nama file berkode tetap tersedia:',
+          aliasError.message
+        );
+        setMasterAliasAnomali([]);
+      } else {
+        setMasterAliasAnomali(aliasData || []);
+        console.log('=== MASTER ALIAS ANOMALI BERHASIL DIMUAT ===');
+        console.table(aliasData || []);
+      }
     } catch (err) {
       console.error('Gagal memuat aturan master anomali:', err.message);
     }
@@ -440,13 +473,50 @@ export default function DashboardKantor() {
         const bstr = evt.target.result;
         const wb = XLSX.read(bstr, { type: 'binary' });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const rawDataAwal = XLSX.utils.sheet_to_json(ws, {
-          range: 3,
+
+        const normalisasiHeader = (nilai) =>
+          String(nilai ?? '')
+            .toLowerCase()
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-z0-9]+/g, '');
+
+        // Deteksi header otomatis agar file dengan header baris 1 maupun baris 4 sama-sama bisa dibaca.
+        const matriksAwal = XLSX.utils.sheet_to_json(ws, {
+          header: 1,
           defval: ''
         });
 
-        // File BPS dapat memiliki satu baris nomor kolom: (1), (2), ... .
-        // Itu bukan data responden, jadi dibuang otomatis.
+        const kataHeaderPenting = new Set([
+          'assignmentid', 'idassignment',
+          'namausaha', 'namaak', 'namakk', 'namakrt', 'namasubjek', 'namakepalakeluarga',
+          'namaanomali', 'deskripsianomali', 'anomali',
+          'level6fullcode', 'idsubsls',
+          'kodedesa', 'kodesls', 'subsls',
+          'nourutkk', 'ppl', 'emailppl1'
+        ]);
+
+        let headerRowIndex = 0;
+        let skorHeaderTerbaik = -1;
+
+        matriksAwal.slice(0, 15).forEach((baris, idx) => {
+          const headerNormal = baris.map(normalisasiHeader).filter(Boolean);
+          const skor = headerNormal.reduce(
+            (total, nama) => total + (kataHeaderPenting.has(nama) ? 1 : 0),
+            0
+          );
+          if (skor > skorHeaderTerbaik) {
+            skorHeaderTerbaik = skor;
+            headerRowIndex = idx;
+          }
+        });
+
+        const rawDataAwal = XLSX.utils.sheet_to_json(ws, {
+          range: headerRowIndex,
+          defval: ''
+        });
+
+        // Buang baris nomor kolom seperti (1), (2), ... jika ada.
         const rawData = rawDataAwal.filter((row) => {
           const nilaiTerisi = Object.values(row)
             .map((nilai) => String(nilai ?? '').trim())
@@ -468,13 +538,6 @@ export default function DashboardKantor() {
         const headersAsli = Object.keys(rawData[0]);
         setExcelHeaders(headersAsli);
 
-        const normalisasiHeader = (nilai) =>
-          String(nilai ?? '')
-            .toLowerCase()
-            .normalize('NFKD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .replace(/[^a-z0-9]+/g, '');
-
         const tebakKolom = (kemungkinan) => {
           const kandidat = kemungkinan.map(normalisasiHeader);
           const hasil = headersAsli.find((header) =>
@@ -483,41 +546,245 @@ export default function DashboardKantor() {
           return hasil || '';
         };
 
+        const colIdSubSls = tebakKolom([
+          'idsubsls', 'level_6_full_code', 'level6fullcode',
+          'kode_subsls_lengkap', 'kodesubslengkap'
+        ]);
+        const colAssignment = tebakKolom(['assignmentid', 'assignment_id', 'idassignment']);
+        const colNamaAk = tebakKolom(['namaak', 'nama_ak', 'namadtsen', 'nama_dtsen']);
+        const colNamaUsaha = tebakKolom(['namausaha', 'nama_usaha']);
+        const colNamaKk = tebakKolom(['namakk', 'nama_kk', 'namakrt', 'namakepalakeluarga']);
+        const colNoUrutKk = tebakKolom(['nourutkk', 'no_urut_kk', 'nourutak', 'no_urut_ak']);
+        const colNamaAnomali = tebakKolom([
+          'namaanomali', 'deskripsianomali', 'anomali', 'keterangan', 'pesan',
+          'indikatoranomali', 'namakasusanomali', 'kasusanomali',
+          'uraiananomali', 'deskripsikasusanomali'
+        ]);
+
+        let subjectMode = 'UMUM';
+        let colNamaSubjek = tebakKolom(['namasubjek', 'nama']);
+
+        // Aturan subjek:
+        // 1) Jika ada nama_AK, itulah orang yang memiliki anomali. NamaKK tidak dipakai sebagai fallback per baris.
+        // 2) Jika tidak ada nama_AK tetapi ada nama_usaha, subjek adalah usaha.
+        // 3) Jika file anomali rumah tangga tidak memiliki nama_AK, gunakan NamaKK sebagai subjek keluarga/rumah tangga.
+        if (colNamaAk) {
+          subjectMode = 'ANGGOTA_KELUARGA';
+          colNamaSubjek = colNamaAk;
+        } else if (colNamaUsaha) {
+          subjectMode = 'USAHA';
+          colNamaSubjek = colNamaUsaha;
+        } else if (colNamaKk) {
+          subjectMode = 'KELUARGA_RUMAH_TANGGA';
+          colNamaSubjek = colNamaKk;
+        }
+
+        const namaFile = String(file.name || '');
+        const namaFileNormal = namaFile.toLowerCase();
+
+        const tebakKodeDariNamaFile = () => {
+          // Normalisasi nama file dan alias supaya spasi, underscore, dash,
+          // huruf besar/kecil, serta ekstensi file tidak memengaruhi pencocokan.
+          const normalisasiAlias = (nilai) =>
+            String(nilai ?? '')
+              .toLowerCase()
+              .normalize('NFKD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .replace(/\.[a-z0-9]{1,8}$/i, '')
+              .replace(/[^a-z0-9]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+
+          const namaFileAlias = normalisasiAlias(namaFile);
+
+          const cariMasterKode = (kode) =>
+            masterAnomali.find(
+              (item) =>
+                String(item.kode || '').trim().toUpperCase() ===
+                String(kode || '').trim().toUpperCase()
+            );
+
+          const hasilKodeLangsung = (kode) => {
+            if (cariMasterKode(kode)) {
+              return { kode, warning: '' };
+            }
+
+            return {
+              kode: '',
+              warning: `Kode ${kode} terdeteksi dari nama file, tetapi belum ada di Master Anomali. Tambahkan kode tersebut ke master_anomali terlebih dahulu.`
+            };
+          };
+
+          // File AK14/AK15 sengaja tidak diputuskan otomatis sampai arahan mentor jelas.
+          if (
+            /ak[\s_-]*14[\s/_-]*15/i.test(namaFile) ||
+            namaFileAlias.includes('ak 14 15') ||
+            (namaFileAlias.includes('ak14') && namaFileAlias.includes('15'))
+          ) {
+            return {
+              kode: '',
+              warning:
+                'File ini mengarah ke AK14/AK15. Pilih AK14 atau AK15 secara manual setelah mentor memastikan apakah digabung atau dipisah.'
+            };
+          }
+
+          // Prioritas 1: bila kode memang tertulis di nama file, gunakan langsung.
+          const matchAk = namaFile.match(/\bAK[\s_-]*0?(\d{1,2})\b/i);
+          if (matchAk) return hasilKodeLangsung(`AK${Number(matchAk[1])}`);
+
+          // Sejumlah file keluarga diberi nama K28/K29/K33/...;
+          // standar penyimpanan SIMALI tetap AKxx.
+          const matchK = namaFile.match(/\bK[\s_-]*0?(\d{1,2})\b/i);
+          if (matchK) return hasilKodeLangsung(`AK${Number(matchK[1])}`);
+
+          const matchAu = namaFile.match(/\bAU[\s_-]*0?(\d{1,2})\b/i);
+          if (matchAu) return hasilKodeLangsung(`AU${Number(matchAu[1])}`);
+
+          // A15 adalah kode lama SIMALI yang juga boleh tertulis langsung.
+          const matchA = namaFile.match(/\bA[\s_-]*0?(\d{1,2})\b/i);
+          if (matchA) return hasilKodeLangsung(`A${Number(matchA[1])}`);
+
+          // Prioritas 2: cocokkan nama file dengan master_alias_anomali dari Supabase.
+          // Alias terpanjang dipilih supaya frasa yang lebih spesifik menang,
+          // misalnya "penerangan listrik non PLN atau bukan listrik" tidak salah
+          // terbaca sebagai alias yang lebih pendek.
+          const kandidatAlias = (masterAliasAnomali || [])
+            .filter((item) => item?.aktif !== false)
+            .map((item) => {
+              const aliasNormal = normalisasiAlias(item.alias_file);
+              const cocok =
+                Boolean(aliasNormal) &&
+                (namaFileAlias === aliasNormal || namaFileAlias.includes(aliasNormal));
+
+              return {
+                ...item,
+                aliasNormal,
+                cocok,
+                skor:
+                  namaFileAlias === aliasNormal
+                    ? 100000 + aliasNormal.length
+                    : aliasNormal.length
+              };
+            })
+            .filter((item) => item.cocok)
+            .sort((a, b) => {
+              if (b.skor !== a.skor) return b.skor - a.skor;
+              return Number(a.prioritas ?? 100) - Number(b.prioritas ?? 100);
+            });
+
+          if (kandidatAlias.length > 0) {
+            const terbaik = kandidatAlias[0];
+            const kode = String(terbaik.kode_anomali || '').trim().toUpperCase();
+
+            if (cariMasterKode(kode)) {
+              return {
+                kode,
+                warning: '',
+                alias: terbaik.alias_file
+              };
+            }
+
+            return {
+              kode: '',
+              warning: `Alias "${terbaik.alias_file}" mengarah ke ${kode}, tetapi kode itu belum ada di master_anomali.`
+            };
+          }
+
+          return {
+            kode: '',
+            warning:
+              'Kode anomali belum terdeteksi. Jika kode tidak ditulis di nama file, tambahkan alias nama file ke tabel master_alias_anomali di Supabase.'
+          };
+        };
+        const hasilKode = tebakKodeDariNamaFile();
+        const gunakanUniversal =
+          Boolean(colIdSubSls && colAssignment && colNamaSubjek) &&
+          (Boolean(hasilKode.kode) || !colNamaAnomali);
+
+        setImportPreset(gunakanUniversal ? 'UNIVERSAL' : 'UMUM_LAMA');
+        setSelectedImportKode(hasilKode.kode);
+
+        setDetectedImportInfo({
+          fileName: namaFile,
+          subjectMode,
+          warning: hasilKode.warning,
+          suggestedKode: hasilKode.kode
+        });
+
         setColumnMap({
-          assignment_id: tebakKolom(['assignmentid', 'assignment_id', 'id', 'idassignment']),
-          nama_subjek: tebakKolom(['namausaha', 'namakrt', 'namasubjek', 'namakepalakeluarga', 'nama']),
-          nama_anomali: tebakKolom([
-            'namaanomali', 'deskripsianomali', 'anomali', 'keterangan', 'pesan',
-            'indikatoranomali', 'namakasusanomali', 'kasusanomali',
-            'uraiananomali', 'deskripsikasusanomali'
-          ]),
+          idsubsls: colIdSubSls,
+          assignment_id: colAssignment,
+          nama_subjek: colNamaSubjek,
+          nama_kk: colNamaKk,
+          no_urut_kk: colNoUrutKk,
+          nama_anomali: colNamaAnomali,
           kodedesa: tebakKolom(['kodedesa', 'kddesa', 'iddesa', 'desa']),
           sls: tebakKolom(['kodesls', 'kdsls', 'idsls', 'sls']),
           subsls: tebakKolom(['subsls', 'kdsubsls', 'sub_sls']),
           link_fasih: tebakKolom(['linkfasih', 'link_fasih', 'urlfasih', 'tautan']),
-          // Utamakan nama header jika terdeteksi. Jika tidak, gunakan posisi Kolom O (index 14).
           status_fasih_excel: tebakKolom([
             'statustindaklanjut', 'status_tindak_lanjut', 'statustindaklanjutfasih',
             'statusfasih', 'status_fasih', 'tindaklanjut', 'tindak_lanjut',
             'statusperbaikan', 'statusanomali'
-          ]) || headersAsli[14] || ''
+          ])
+        });
+
+        console.log('=== DETEKSI UNIVERSAL IMPORTER ===', {
+          nama_file: namaFile,
+          header_row_excel: headerRowIndex + 1,
+          mode: gunakanUniversal ? 'UNIVERSAL' : 'UMUM_LAMA',
+          kode_terdeteksi: hasilKode.kode || '(manual)',
+          subject_mode: subjectMode,
+          jumlah_baris: rawData.length,
+          headers: headersAsli
         });
 
         setRawExcelData(rawData);
+        setMappedRowItems([]);
         setHasilUploadRingkasan(null);
-        setModalUploadReview(true); 
+        setModalUploadReview(true);
       } catch (err) {
         alert('Gagal membaca file Excel: ' + err.message);
         setUploading(false);
       }
     };
+
     reader.readAsBinaryString(file);
     e.target.value = '';
   };
 
   const handleProsesReviewBarisData = () => {
-    if (!columnMap.assignment_id || !columnMap.nama_subjek || !columnMap.nama_anomali || !columnMap.status_fasih_excel) {
-      alert('Mohon petakan kolom ID Assignment, Nama Subjek, Nama Anomali, dan Status Tindak Lanjut FASIH (Kolom O)!');
+    const modeUniversal = importPreset === 'UNIVERSAL';
+    const punyaIdSubSlsLangsung = Boolean(columnMap.idsubsls);
+    const bisaMenyusunIdSubSls = Boolean(columnMap.kodedesa && columnMap.sls);
+
+    if (!columnMap.assignment_id || !columnMap.nama_subjek) {
+      alert('Mohon petakan minimal kolom ID Assignment dan Nama Subjek!');
+      return;
+    }
+
+    if (!punyaIdSubSlsLangsung && !bisaMenyusunIdSubSls) {
+      alert('Mohon petakan ID Sub-SLS langsung (mis. level_6_full_code) ATAU Kode Desa + Kode SLS!');
+      return;
+    }
+
+    let masterPilihan = null;
+    if (modeUniversal) {
+      if (!selectedImportKode) {
+        alert('Pilih Kode Anomali terlebih dahulu. Untuk file AK14/AK15, tunggu keputusan mentor lalu pilih AK14 atau AK15.');
+        return;
+      }
+
+      masterPilihan = masterAnomali.find(
+        item => String(item.kode).trim().toUpperCase() === String(selectedImportKode).trim().toUpperCase()
+      );
+
+      if (!masterPilihan) {
+        alert(`Kode ${selectedImportKode} belum ada di master_anomali. Jalankan SQL master anomali universal lalu muat ulang dashboard.`);
+        return;
+      }
+    } else if (!columnMap.nama_anomali) {
+      alert('Untuk mode format lama, kolom Nama / Deskripsi Anomali wajib dipetakan.');
       return;
     }
 
@@ -531,8 +798,6 @@ export default function DashboardKantor() {
         .replace(/\s+/g, ' ')
         .trim();
 
-    // Kolom N pada rilis mikro adalah data GROUPED: satu baris dapat memuat
-    // beberapa anomali sekaligus. Pecah berdasarkan penanda "Anomali Keluarga/Usaha N".
     const pecahDaftarAnomali = (nilai) => {
       const teks = String(nilai ?? '').trim();
       if (!teks) return [];
@@ -540,7 +805,6 @@ export default function DashboardKantor() {
       const regexPenanda = /Anomali\s+(Keluarga|Usaha)\s+(\d+)\s*\(/gi;
       const semuaPenanda = [...teks.matchAll(regexPenanda)];
 
-      // Fallback untuk format lama yang tidak memiliki penanda standar.
       if (semuaPenanda.length === 0) {
         return [{ teks, jenis: null, nomor: null }];
       }
@@ -559,11 +823,7 @@ export default function DashboardKantor() {
       });
     };
 
-    // Penomoran master SIMALI:
-    //   Anomali Usaha 1-8    -> A01-A08
-    //   Anomali Keluarga 1-6 -> A09-A14
-    // Ini lebih aman daripada keyword umum seperti "Usaha Menengah dan Besar"
-    // yang dapat membuat Usaha 7 terbaca sebagai A06.
+    // Kompatibilitas untuk file lama SIMALI.
     const kodeDariLabelSumber = (jenis, nomor) => {
       if (jenis === 'USAHA' && nomor >= 1 && nomor <= 8) {
         return `A${String(nomor).padStart(2, '0')}`;
@@ -575,8 +835,18 @@ export default function DashboardKantor() {
     };
 
     const itemHasilOlahan = rawExcelData.flatMap((row, index) => {
-      const namaAnomaliRaw = row[columnMap.nama_anomali] || '';
-      const daftarAnomali = pecahDaftarAnomali(namaAnomaliRaw);
+      const assignmentId = String(row[columnMap.assignment_id] ?? '').trim();
+      const namaSubjek = String(row[columnMap.nama_subjek] ?? '').trim();
+      const namaKkAsli = columnMap.nama_kk ? String(row[columnMap.nama_kk] ?? '').trim() : '';
+      const noUrutKk = columnMap.no_urut_kk ? String(row[columnMap.no_urut_kk] ?? '').trim() : '';
+
+      const idSubSlsLangsungRaw = columnMap.idsubsls
+        ? String(row[columnMap.idsubsls] ?? '').trim()
+        : '';
+
+      const idSubSlsLangsung = idSubSlsLangsungRaw
+        .replace(/\.0+$/, '')
+        .replace(/\s+/g, '');
 
       const desaRaw = columnMap.kodedesa ? String(row[columnMap.kodedesa] || '') : '';
       const slsRaw = columnMap.sls ? String(row[columnMap.sls] || '') : '';
@@ -585,16 +855,61 @@ export default function DashboardKantor() {
       const desa = desaRaw.trim().padStart(10, '0');
       const sls = slsRaw.trim().padStart(4, '0');
       const subSls = subSlsRaw.trim().padStart(2, '0');
-      const generatedIdSubSls = `${desa}${sls}${subSls}`;
+      const generatedIdSubSls = idSubSlsLangsung || `${desa}${sls}${subSls}`;
+
       const statusFasihExcelRaw = columnMap.status_fasih_excel
         ? row[columnMap.status_fasih_excel]
         : '';
       const statusFasihExcel = normalisasiStatusFasihExcel(statusFasihExcelRaw);
 
-      // Jika kolom anomali kosong, tetap kirim satu ERR agar terlihat di review.
+      const linkFasihExcel = columnMap.link_fasih
+        ? String(row[columnMap.link_fasih] ?? '').trim()
+        : '';
+      const linkFasih = linkFasihExcel || (
+        assignmentId
+          ? `https://fasih-sm.bps.go.id/app/assignment-detail/${assignmentId}`
+          : ''
+      );
+
+      const validasiDasar = [];
+      if (!/^\d{16}$/.test(String(generatedIdSubSls || ''))) {
+        validasiDasar.push('ID Sub-SLS tidak valid (harus 16 digit)');
+      }
+      if (!assignmentId) validasiDasar.push('assignment_id kosong');
+      if (!namaSubjek) {
+        if (detectedImportInfo.subjectMode === 'ANGGOTA_KELUARGA') {
+          validasiDasar.push('nama_AK kosong — tidak diganti otomatis dengan NamaKK');
+        } else {
+          validasiDasar.push('Nama subjek kosong');
+        }
+      }
+
+      if (modeUniversal) {
+        return [{
+          id_lokal: `${index}-0`,
+          idsubsls: generatedIdSubSls,
+          assignment_id: assignmentId,
+          nama_subjek: namaSubjek,
+          nama_kk_asli: namaKkAsli,
+          no_urut_kk: noUrutKk,
+          teks_anomali_asli: masterPilihan?.deskripsi || selectedImportKode,
+          kode_anomali: selectedImportKode,
+          link_fasih: linkFasih,
+          status_fasih_excel_raw: String(statusFasihExcelRaw ?? ''),
+          status_fasih_excel: statusFasihExcel,
+          validasi_error: validasiDasar.join('; '),
+          tipe_masalah_override: 'ANOMALI'
+        }];
+      }
+
+      const namaAnomaliRaw = columnMap.nama_anomali
+        ? String(row[columnMap.nama_anomali] ?? '')
+        : '';
+
+      const daftarAnomali = pecahDaftarAnomali(namaAnomaliRaw);
       const daftarUntukDiproses = daftarAnomali.length > 0
         ? daftarAnomali
-        : [{ teks: String(namaAnomaliRaw), jenis: null, nomor: null }];
+        : [{ teks: namaAnomaliRaw, jenis: null, nomor: null }];
 
       return daftarUntukDiproses.map((anomaliTerpisah, subIndex) => {
         const teksAnomali = anomaliTerpisah.teks;
@@ -603,8 +918,6 @@ export default function DashboardKantor() {
           anomaliTerpisah.nomor
         );
 
-        // Prioritaskan kode eksplisit dari label sumber. Untuk format lama,
-        // baru gunakan pencocokan deskripsi/kata kunci sebagai fallback.
         let aturanCocok = kodeLangsung
           ? masterAnomali.find(
               aturan => String(aturan.kode).trim().toUpperCase() === kodeLangsung
@@ -625,48 +938,37 @@ export default function DashboardKantor() {
               .map((kata) => normalisasiTeks(kata))
               .filter(Boolean);
 
-            return daftarKataKunci.some((kataKunci) =>
-              teksNormal.includes(kataKunci)
-            );
+            return daftarKataKunci.some((kataKunci) => teksNormal.includes(kataKunci));
           });
         }
-
-        const kodeAnomali = aturanCocok?.kode || kodeLangsung || 'ERR';
-
-        console.log('MATCH ANOMALI TERPISAH:', {
-          baris_excel: index + 1,
-          teks_excel: teksAnomali,
-          jenis_sumber: anomaliTerpisah.jenis,
-          nomor_sumber: anomaliTerpisah.nomor,
-          kode_langsung: kodeLangsung,
-          master_kode: aturanCocok?.kode || 'ERR',
-          master_deskripsi: aturanCocok?.deskripsi || null
-        });
 
         return {
           id_lokal: `${index}-${subIndex}`,
           idsubsls: generatedIdSubSls,
-          assignment_id: String(row[columnMap.assignment_id] || `GEN-${Date.now()}-${index}`),
-          nama_subjek: row[columnMap.nama_subjek] || 'Tanpa Nama',
+          assignment_id: assignmentId,
+          nama_subjek: namaSubjek,
+          nama_kk_asli: namaKkAsli,
+          no_urut_kk: noUrutKk,
           teks_anomali_asli: teksAnomali,
-          kode_anomali: kodeAnomali,
-          link_fasih: columnMap.link_fasih ? (row[columnMap.link_fasih] || '') : '',
+          kode_anomali: aturanCocok?.kode || kodeLangsung || 'ERR',
+          link_fasih: linkFasih,
           status_fasih_excel_raw: String(statusFasihExcelRaw ?? ''),
-          status_fasih_excel: statusFasihExcel
+          status_fasih_excel: statusFasihExcel,
+          validasi_error: validasiDasar.join('; '),
+          tipe_masalah_override: null
         };
       });
     });
 
-    console.log('✅ MODE IMPORT: 1 BARIS GROUPED -> BANYAK RECORD ANOMALI');
-    console.log('✅ TOTAL BARIS EXCEL VALID:', rawExcelData.length);
-    console.log('✅ TOTAL ANOMALI HASIL PECAH:', itemHasilOlahan.length);
+    console.log('✅ UNIVERSAL IMPORTER - TOTAL BARIS EXCEL:', rawExcelData.length);
+    console.log('✅ TOTAL RECORD REVIEW:', itemHasilOlahan.length);
     console.log(
-      '⚠️ TOTAL ITEM ERR:',
-      itemHasilOlahan.filter(item => item.kode_anomali === 'ERR').length
+      '⚠️ TOTAL BARIS PERLU PERBAIKAN:',
+      itemHasilOlahan.filter(item => item.validasi_error).length
     );
 
     setMappedRowItems(itemHasilOlahan);
-    setUploadProgressStatus('review_rows'); 
+    setUploadProgressStatus('review_rows');
   };
 
   const handleUbahKodeBarisManual = (idLokal, kodeBaru) => {
@@ -676,15 +978,93 @@ export default function DashboardKantor() {
   };
 
   const handleEksekusiUploadKeDatabase = async () => {
-    const adaYangMasihErr = mappedRowItems.some(item => item.kode_anomali === 'ERR');
-    if (adaYangMasihErr) {
-      alert('Masih ada baris data yang berkode ERR. Silakan tentukan manual terlebih dahulu melalui dropdown yang disediakan!');
+    const barisBermasalah = mappedRowItems.filter(item => item.validasi_error);
+    let barisSiapImport = mappedRowItems.filter(item => !item.validasi_error);
+    let jumlahSlsDilewati = 0;
+
+    if (barisSiapImport.length === 0) {
+      alert('Tidak ada baris yang siap diimpor. Periksa kolom subjek, assignment_id, dan ID Sub-SLS.');
       return;
+    }
+
+    const adaYangMasihErr = barisSiapImport.some(item => item.kode_anomali === 'ERR');
+    if (adaYangMasihErr) {
+      alert('Masih ada baris valid yang berkode ERR. Silakan tentukan manual terlebih dahulu melalui dropdown yang disediakan!');
+      return;
+    }
+
+    if (barisBermasalah.length > 0) {
+      const lanjut = window.confirm(
+        `${barisBermasalah.length} baris memiliki masalah dan akan DILEWATI. ` +
+        `Baris valid yang akan diimpor: ${barisSiapImport.length}.\n\n` +
+        `Untuk file anggota keluarga, nama_AK yang kosong tidak pernah diganti otomatis dengan NamaKK.\n\nLanjutkan impor baris valid?`
+      );
+      if (!lanjut) return;
     }
 
     setUploadProgressStatus('mengirim');
 
     try {
+      // PRE-FLIGHT: semua idsubsls pada BARIS VALID harus terlihat di master muatan_sls.
+      const semuaIdTarget = [
+        ...new Set(barisSiapImport.map(item => String(item.idsubsls || '').trim()).filter(Boolean))
+      ];
+
+      const idMasterDitemukan = new Set();
+      const ukuranBatchId = 100;
+
+      for (let i = 0; i < semuaIdTarget.length; i += ukuranBatchId) {
+        const batchId = semuaIdTarget.slice(i, i + ukuranBatchId);
+        const { data: dataMasterSls, error: errorMasterSls } = await supabaseData
+          .from('muatan_sls')
+          .select('idsubsls')
+          .in('idsubsls', batchId);
+
+        if (errorMasterSls) throw errorMasterSls;
+        (dataMasterSls || []).forEach(row => idMasterDitemukan.add(String(row.idsubsls)));
+      }
+
+      const idBelumAda = semuaIdTarget.filter(id => !idMasterDitemukan.has(id));
+
+      if (semuaIdTarget.length > 0 && idMasterDitemukan.size === 0) {
+        alert(
+          `Tidak ada satu pun dari ${semuaIdTarget.length} ID Sub-SLS yang terlihat dari frontend.\n\n` +
+          `Jika tabel muatan_sls di SQL Editor sebenarnya sudah berisi data Kabupaten Semarang, ini biasanya karena hak SELECT/RLS. ` +
+          `Jalankan SQL policy Universal Importer terlebih dahulu lalu login ulang.`
+        );
+        setUploadProgressStatus('review_rows');
+        return;
+      }
+
+      if (idBelumAda.length > 0) {
+        const setIdBelumAda = new Set(idBelumAda);
+        const barisDenganSlsTidakAda = barisSiapImport.filter(item => setIdBelumAda.has(String(item.idsubsls || '').trim()));
+        const barisTetapValid = barisSiapImport.filter(item => !setIdBelumAda.has(String(item.idsubsls || '').trim()));
+        jumlahSlsDilewati = barisDenganSlsTidakAda.length;
+
+        if (barisTetapValid.length === 0) {
+          alert(
+            `Semua baris valid memakai ID Sub-SLS yang belum tersedia di master muatan_sls.\n\n` +
+            `Contoh ID: ${idBelumAda.slice(0, 10).join(', ')}`
+          );
+          setUploadProgressStatus('review_rows');
+          return;
+        }
+
+        const lanjutTanpaSls = window.confirm(
+          `${idBelumAda.length} ID Sub-SLS belum tersedia di master muatan_sls dan ${jumlahSlsDilewati} baris akan DILEWATI.\n\n` +
+          `Contoh ID: ${idBelumAda.slice(0, 10).join(', ')}\n\n` +
+          `Baris yang tetap dapat diimpor: ${barisTetapValid.length}.\n\nLanjutkan impor baris valid?`
+        );
+
+        if (!lanjutTanpaSls) {
+          setUploadProgressStatus('review_rows');
+          return;
+        }
+
+        barisSiapImport = barisTetapValid;
+      }
+
       // Ambil RIWAYAT secara pagination. Tanpa ini PostgREST bisa hanya
       // mengembalikan sebagian data dan konfirmasi PCL lama gagal terbawa.
       const fetchSemuaHalaman = async (buatQuery) => {
@@ -744,37 +1124,47 @@ export default function DashboardKantor() {
           .order('anomali_id', { ascending: false })
       );
 
-      let jumlahSukses = 0;
+      // Indeks histori agar impor ribuan baris tidak melakukan Array.find berulang kali.
+      const buatKeyHistori = (row) =>
+        `${String(row.assignment_id || '').trim().toLowerCase()}_${String(row.kode_anomali || '').trim().toLowerCase()}_${String(row.nama_subjek || '').trim().toLowerCase()}`;
+
+      const petaMenggantungByKey = new Map();
+      (dataMenggantung || []).forEach((row) => {
+        const key = buatKeyHistori(row);
+        if (!petaMenggantungByKey.has(key)) petaMenggantungByKey.set(key, row);
+      });
+
+      const petaHistoriByKey = new Map();
+      (historiLengkap || []).forEach((row) => {
+        const key = buatKeyHistori(row);
+        if (!petaHistoriByKey.has(key)) petaHistoriByKey.set(key, row);
+      });
+
       let jumlahGagal = 0;
 
       const petaCatatanRiwayat = {};
       const petaStatusFasihExcel = {};
       const setKunciUnikImpor = new Set(); 
 
-      const formattedDataRaw = mappedRowItems.map((item) => {
+      const formattedDataRaw = barisSiapImport.map((item) => {
         try {
           const aturanCocok = masterAnomali.find(a => a.kode === item.kode_anomali);
           const kategori = aturanCocok ? aturanCocok.kategori : 'USAHA';
 
-          const teksCari = item.teks_anomali_asli.toLowerCase();
-          const tipeMasalahDitemukan = (teksCari.includes('kosong') || teksCari.includes('missing') || teksCari.includes('tidak ada')) 
-            ? 'MISSING_VALUE' 
-            : 'ANOMALI';
+          const teksCari = String(item.teks_anomali_asli || '').toLowerCase();
+          // File Universal adalah daftar anomali hasil query. Frasa "tidak ada"
+          // (mis. pendapatan tidak ada) tetap ANOMALI, bukan otomatis Missing Value.
+          const tipeMasalahDitemukan = item.tipe_masalah_override || (
+            (String(item.kode_anomali).startsWith('M') || teksCari.includes('variabel kosong') || teksCari.includes('missing value'))
+              ? 'MISSING_VALUE'
+              : 'ANOMALI'
+          );
 
           const namaSubjekBersih = String(item.nama_subjek).trim();
 
-          const temukanDataLama = dataMenggantung?.find(
-            old => old.assignment_id === item.assignment_id && 
-                   old.kode_anomali === item.kode_anomali &&
-                   String(old.nama_subjek).trim().toLowerCase() === namaSubjekBersih.toLowerCase()
-          );
-
-          const jejakMasaLalu = historiLengkap?.find(
-            old => String(old.assignment_id).trim().toLowerCase() === String(item.assignment_id).trim().toLowerCase() && 
-                   String(old.kode_anomali).trim().toLowerCase() === String(item.kode_anomali).trim().toLowerCase() && 
-                   String(old.nama_subjek).trim().toLowerCase() === namaSubjekBersih.toLowerCase() &&
-                   old.tanggal_snapshot < pilihanTanggalSnapshot
-          );
+          const keyHistoriItem = `${String(item.assignment_id).trim().toLowerCase()}_${String(item.kode_anomali).trim().toLowerCase()}_${namaSubjekBersih.toLowerCase()}`;
+          const temukanDataLama = petaMenggantungByKey.get(keyHistoriItem);
+          const jejakMasaLalu = petaHistoriByKey.get(keyHistoriItem);
 
           const keyGabung = `${String(item.assignment_id).trim()}_${String(item.kode_anomali).trim()}_${namaSubjekBersih.toLowerCase()}`;
 
@@ -785,7 +1175,6 @@ export default function DashboardKantor() {
             petaCatatanRiwayat[keyGabung] = jejakMasaLalu;
           }
 
-          jumlahSukses++;
           return {
             idsubsls: item.idsubsls,
             assignment_id: item.assignment_id,
@@ -813,17 +1202,26 @@ export default function DashboardKantor() {
       });
 
       if (formattedData.length > 0) {
-        const { data: dataBaruDisisipkan, error } = await supabaseData
-          .from('anomali_data')
-          .upsert(formattedData, {
-            onConflict: 'assignment_id, kode_anomali, nama_subjek, tanggal_snapshot',
-            ignoreDuplicates: false 
-          })
-          .select('id, assignment_id, kode_anomali, nama_subjek');
+        // File AK dapat berisi ribuan baris (mis. >8.000). Kirim bertahap agar
+        // request PostgREST tidak terlalu besar dan progres lebih stabil.
+        const ukuranBatchUpsert = 500;
+        const dataBaruDisisipkan = [];
 
-        if (error) throw error;
+        for (let i = 0; i < formattedData.length; i += ukuranBatchUpsert) {
+          const batchData = formattedData.slice(i, i + ukuranBatchUpsert);
+          const { data: dataBatch, error } = await supabaseData
+            .from('anomali_data')
+            .upsert(batchData, {
+              onConflict: 'assignment_id, kode_anomali, nama_subjek, tanggal_snapshot',
+              ignoreDuplicates: false
+            })
+            .select('id, assignment_id, kode_anomali, nama_subjek');
 
-        if (dataBaruDisisipkan && dataBaruDisisipkan.length > 0) {
+          if (error) throw error;
+          dataBaruDisisipkan.push(...(dataBatch || []));
+        }
+
+        if (dataBaruDisisipkan.length > 0) {
           const payloadTindakLanjut = [];
 
           dataBaruDisisipkan.forEach((barisBaru) => {
@@ -833,7 +1231,7 @@ export default function DashboardKantor() {
 
             if (dataLamaDitemukan) {
               payloadTindakLanjut.push({
-                anomali_id: barisBaru.id, 
+                anomali_id: barisBaru.id,
                 status_konfirmasi: dataLamaDitemukan.status_konfirmasi,
                 catatan_lapangan: dataLamaDitemukan.catatan_lapangan,
                 dkonfirmasi_oleh_email: dataLamaDitemukan.dkonfirmasi_oleh_email,
@@ -859,22 +1257,32 @@ export default function DashboardKantor() {
             }
           });
 
-          if (payloadTindakLanjut.length > 0) {
+          for (let i = 0; i < payloadTindakLanjut.length; i += ukuranBatchUpsert) {
+            const batchTl = payloadTindakLanjut.slice(i, i + ukuranBatchUpsert);
             const { error: errUpsertTindakLanjut } = await supabaseData
               .from('tindak_lanjut_anomali')
-              .upsert(payloadTindakLanjut, { onConflict: 'anomali_id' });
+              .upsert(batchTl, { onConflict: 'anomali_id' });
 
             if (errUpsertTindakLanjut) throw errUpsertTindakLanjut;
           }
         }
       }
 
+      const jumlahDuplikatDilewati = formattedDataRaw.length - formattedData.length;
+      const daftarStatusRecordUnik = formattedData.map((item) => {
+        const key = `${String(item.assignment_id).trim()}_${String(item.kode_anomali).trim()}_${String(item.nama_subjek).trim().toLowerCase()}`;
+        return petaStatusFasihExcel[key] || 'Belum Tindak Lanjut FASIH';
+      });
+
       setHasilUploadRingkasan({
         total: mappedRowItems.length,
-        sukses: jumlahSukses,
-        gagal: jumlahGagal,
-        sudahFasihExcel: mappedRowItems.filter(item => item.status_fasih_excel === 'Sudah Tindak Lanjut FASIH').length,
-        belumFasihExcel: mappedRowItems.filter(item => item.status_fasih_excel !== 'Sudah Tindak Lanjut FASIH').length
+        sukses: formattedData.length,
+        gagal: jumlahGagal + barisBermasalah.length + jumlahSlsDilewati,
+        dilewatiValidasi: barisBermasalah.length,
+        slsDilewati: jumlahSlsDilewati,
+        duplikatDilewati: jumlahDuplikatDilewati,
+        sudahFasihExcel: daftarStatusRecordUnik.filter(status => status === 'Sudah Tindak Lanjut FASIH').length,
+        belumFasihExcel: daftarStatusRecordUnik.filter(status => status !== 'Sudah Tindak Lanjut FASIH').length
       });
       setUploadProgressStatus('selesai');
       fetchDataMonitoringKantor();
@@ -1327,9 +1735,6 @@ export default function DashboardKantor() {
                 <h2 className="text-sm font-black text-slate-800">
                   🔎 Query Status Tindak Lanjut FASIH per Anomali
                 </h2>
-                <p className="text-[11px] text-stone-500 mt-1">
-                  Setiap baris adalah satu data anomali. Status dibaca langsung dari <span className="font-mono font-bold">view_monitoring_anomali.status_fasih</span>.
-                </p>
               </div>
 
               <div className="flex flex-wrap gap-2">
@@ -1789,20 +2194,100 @@ export default function DashboardKantor() {
                   />
                 </div>
 
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-slate-600 block uppercase tracking-wide">🧩 Mode Import:</label>
+                  <select
+                    value={importPreset}
+                    onChange={(e) => setImportPreset(e.target.value)}
+                    className="w-full bg-white border border-stone-300 rounded-lg p-2 text-xs font-bold text-slate-800 focus:outline-amber-600"
+                  >
+                    <option value="UNIVERSAL">Universal Importer — satu file = satu jenis anomali</option>
+                    <option value="UMUM_LAMA">Format Lama SIMALI — kolom deskripsi anomali grouped</option>
+                  </select>
+
+                  {importPreset === 'UNIVERSAL' && (
+                    <div className="space-y-2">
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-[10px] leading-relaxed text-emerald-900">
+                        <div><strong>File:</strong> {detectedImportInfo.fileName || '-'}</div>
+                        <div><strong>Mode subjek:</strong> {
+                          detectedImportInfo.subjectMode === 'ANGGOTA_KELUARGA'
+                            ? 'Anggota keluarga — nama_AK adalah orang yang memiliki anomali'
+                            : detectedImportInfo.subjectMode === 'KELUARGA_RUMAH_TANGGA'
+                              ? 'Rumah tangga/keluarga — file tidak memiliki nama_AK, sehingga NamaKK dipakai sebagai subjek rumah tangga'
+                              : detectedImportInfo.subjectMode === 'USAHA'
+                                ? 'Usaha — nama_usaha dipakai sebagai subjek'
+                                : 'Umum'
+                        }</div>
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-bold text-slate-600 block uppercase tracking-wide mb-1">
+                          ⚠️ Kode Anomali untuk seluruh file *
+                        </label>
+                        <select
+                          value={selectedImportKode}
+                          onChange={(e) => setSelectedImportKode(e.target.value)}
+                          className={`w-full bg-white border rounded-lg p-2 text-xs font-bold focus:outline-amber-600 ${
+                            !selectedImportKode ? 'border-rose-300 text-rose-800' : 'border-stone-300 text-slate-800'
+                          }`}
+                        >
+                          <option value="">-- Pilih Kode Anomali --</option>
+                          {masterAnomali
+                            .slice()
+                            .sort((a, b) => String(a.kode).localeCompare(String(b.kode), undefined, { numeric: true }))
+                            .map((rules) => (
+                              <option key={rules.kode} value={rules.kode}>
+                                [{rules.kode}] {rules.kategori} — {rules.deskripsi}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      {detectedImportInfo.warning && (
+                        <p className="text-[10px] leading-relaxed text-rose-800 bg-rose-50 border border-rose-200 rounded-lg p-2 font-semibold">
+                          ⚠️ {detectedImportInfo.warning}
+                        </p>
+                      )}
+
+                      {detectedImportInfo.subjectMode === 'ANGGOTA_KELUARGA' && (
+                        <p className="text-[10px] leading-relaxed text-sky-800 bg-sky-50 border border-sky-200 rounded-lg p-2">
+                          Untuk file AK yang memiliki kolom <strong>nama_AK</strong>, SIMALI memakai kolom itu sebagai
+                          <strong> nama orang yang memiliki anomali</strong>. Jika nama_AK kosong pada suatu baris, baris itu
+                          ditandai bermasalah dan tidak diganti otomatis dengan NamaKK.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 <div className="border-t pt-2">
                   <span className="text-[10px] font-black text-amber-800 block uppercase tracking-wider mb-2">🔄 Pemetaan Kolom Berkas (Column Mapper):</span>
                   <p className="text-[11px] text-stone-500 mb-3">Sesuaikan kolom sistem (kiri) dengan nama kolom yang ada di dalam Excel Anda (kanan).</p>
                   
                   <div className="space-y-3">
                     {[
+                      { label: '📌 ID Sub-SLS langsung (16 Digit) *', field: 'idsubsls' },
                       { label: '🆔 ID Assignment / Dokumen *', field: 'assignment_id' },
-                      { label: '🧑 Nama Pengusaha / Kepala RT *', field: 'nama_subjek' },
-                      { label: '⚠️ Nama / Deskripsi Anomali *', field: 'nama_anomali' },
-                      { label: '📍 Kode Desa (10 Digit)', field: 'kodedesa' },
-                      { label: '🗺️ Kode SLS (4 Digit)', field: 'sls' },
-                      { label: '🌿 Kode Sub-SLS (2 Digit)', field: 'subsls' },
-                      { label: '🔗 Tautan Dokumen FASIH', field: 'link_fasih' },
-                      { label: '✅ Status Tindak Lanjut FASIH (Kolom O) *', field: 'status_fasih_excel' },
+                      {
+                        label: detectedImportInfo.subjectMode === 'ANGGOTA_KELUARGA'
+                          ? '🧑 Nama AK yang memiliki anomali *'
+                          : detectedImportInfo.subjectMode === 'USAHA'
+                            ? '🏢 Nama Usaha *'
+                            : detectedImportInfo.subjectMode === 'KELUARGA_RUMAH_TANGGA'
+                              ? '🏠 Nama KK / Rumah Tangga *'
+                              : '🧑 Nama Subjek *',
+                        field: 'nama_subjek'
+                      },
+                      { label: '👪 Nama KK (konteks, opsional)', field: 'nama_kk' },
+                      { label: '🔢 No. Urut Anggota (opsional)', field: 'no_urut_kk' },
+                      ...(importPreset === 'UMUM_LAMA'
+                        ? [{ label: '⚠️ Nama / Deskripsi Anomali *', field: 'nama_anomali' }]
+                        : []),
+                      { label: '📍 Kode Desa (10 Digit; fallback)', field: 'kodedesa' },
+                      { label: '🗺️ Kode SLS (4 Digit; fallback)', field: 'sls' },
+                      { label: '🌿 Kode Sub-SLS (2 Digit; fallback)', field: 'subsls' },
+                      { label: '🔗 Tautan Dokumen FASIH (opsional; dibuat otomatis)', field: 'link_fasih' },
+                      { label: '✅ Status Tindak Lanjut FASIH (opsional; default Belum)', field: 'status_fasih_excel' },
                     ].map((item) => (
                       <div key={item.field} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-stone-50 p-2 rounded-lg border border-stone-200">
                         <label className="text-xs font-semibold text-slate-700 w-full sm:w-[45%]">{item.label}</label>
@@ -1842,8 +2327,32 @@ export default function DashboardKantor() {
 
             {uploadProgressStatus === 'review_rows' && (
               <div className="space-y-4">
-                <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-xs text-amber-900 font-medium">
-                  💡 <strong>Informasi:</strong> Data terbaru menjadi dasar dashboard. Status FASIH dibaca dari <strong>{columnMap.status_fasih_excel}</strong> (Kolom O). Baris dengan status "Sudah Ditindaklanjuti" akan masuk <strong>Sudah Tindak Lanjut FASIH</strong>; selain itu masuk <strong>Belum Tindak Lanjut FASIH</strong>. Kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span> tetap wajib dipetakan manual.
+                <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-xs text-amber-900 font-medium space-y-1">
+                  {importPreset === 'UNIVERSAL' ? (
+                    <>
+                      <div>
+                        💡 <strong>Universal:</strong> seluruh baris valid akan disimpan sebagai
+                        <strong> {selectedImportKode || '(kode belum dipilih)'}</strong>.
+                        Status FASIH kosong otomatis menjadi <strong>Belum Tindak Lanjut FASIH</strong>.
+                      </div>
+                      <div>
+                        Subjek dibaca dari <strong>{columnMap.nama_subjek || '-'}</strong>.
+                        {detectedImportInfo.subjectMode === 'ANGGOTA_KELUARGA' && (
+                          <> Baris dengan <strong>nama_AK kosong</strong> akan ditandai dan dilewati, bukan diganti NamaKK.</>
+                        )}
+                      </div>
+                      <div>
+                        Siap: <strong>{mappedRowItems.filter(item => !item.validasi_error).length}</strong> ·
+                        Perlu perbaikan: <strong className="text-rose-700">{mappedRowItems.filter(item => item.validasi_error).length}</strong>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      💡 <strong>Format lama:</strong> data terbaru menjadi dasar dashboard. Status FASIH dibaca dari
+                      <strong> {columnMap.status_fasih_excel || '(kosong → Belum Tindak Lanjut FASIH)'}</strong>.
+                      Kode <span className="bg-red-200 text-red-900 font-bold px-1 rounded">ERR</span> tetap wajib dipetakan manual.
+                    </>
+                  )}
                 </div>
 
                 <div className="overflow-x-auto border rounded-xl max-h-[50vh] bg-stone-50 shadow-inner">
@@ -1853,7 +2362,7 @@ export default function DashboardKantor() {
                         <th className="p-2.5 w-[5%] text-center">No</th>
                         <th className="p-2.5 w-[25%]">Nama Responden / Subjek</th>
                         <th className="p-2.5 w-[40%] bg-amber-100/30">
-                          Teks Kolom Excel Asli (<span className="underline italic">{columnMap.nama_anomali}</span>)
+                          Teks Anomali (<span className="underline italic">{importPreset === 'UNIVERSAL' ? selectedImportKode : (columnMap.nama_anomali || '-')}</span>)
                         </th>
                         <th className="p-2.5 w-[25%]">Aturan / Kode Dipetakan</th>
                         <th className="p-2.5 w-[20%]">Status FASIH Excel</th>
@@ -1862,12 +2371,22 @@ export default function DashboardKantor() {
                     <tbody className="divide-y divide-stone-200 bg-white">
                       {mappedRowItems.map((item, idx) => {
                         const isErr = item.kode_anomali === 'ERR';
+                        const adaValidasiError = Boolean(item.validasi_error);
                         return (
-                          <tr key={item.id_lokal} className={`hover:bg-stone-50/70 transition-colors ${isErr ? 'bg-red-50/40' : ''}`}>
+                          <tr key={item.id_lokal} className={`hover:bg-stone-50/70 transition-colors ${isErr || adaValidasiError ? 'bg-red-50/50' : ''}`}>
                             <td className="p-2.5 text-center font-mono text-slate-400">{idx + 1}</td>
                             <td className="p-2.5 font-bold text-slate-900">
-                              {item.nama_subjek}
-                              <span className="block text-[10px] font-mono text-stone-400 font-medium">ID: {item.assignment_id}</span>
+                              {item.nama_subjek || <span className="text-rose-700">[nama kosong]</span>}
+                              <span className="block text-[10px] font-mono text-stone-400 font-medium">ID: {item.assignment_id || '-'}</span>
+                              {item.nama_kk_asli && detectedImportInfo.subjectMode === 'ANGGOTA_KELUARGA' && (
+                                <span className="block text-[10px] text-slate-500 font-medium">KK: {item.nama_kk_asli}</span>
+                              )}
+                              {item.no_urut_kk && (
+                                <span className="block text-[10px] text-slate-500 font-medium">No. urut AK: {item.no_urut_kk}</span>
+                              )}
+                              {adaValidasiError && (
+                                <span className="block mt-1 text-[10px] text-rose-700 font-black">⚠ {item.validasi_error}</span>
+                              )}
                             </td>
                             <td className="p-2.5 italic text-slate-700 font-medium bg-amber-50/10 leading-relaxed">
                               "{item.teks_anomali_asli}"
@@ -1895,7 +2414,7 @@ export default function DashboardKantor() {
                                 {item.status_fasih_excel}
                               </span>
                               <span className="block mt-1 text-[9px] text-stone-400 font-medium break-words">
-                                Excel: {item.status_fasih_excel_raw || '(kosong)'}
+                                Sumber: {item.status_fasih_excel_raw || '(kosong → default belum)'}
                               </span>
                             </td>
                           </tr>
@@ -1936,14 +2455,28 @@ export default function DashboardKantor() {
 
             {uploadProgressStatus === 'selesai' && hasilUploadRingkasan && (
               <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-3 text-center">
+                <div className="grid grid-cols-3 gap-3 text-center">
                   <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-xl shadow-3xs">
-                    <span className="text-[10px] text-emerald-800 font-bold uppercase block tracking-wide">Sukses Terproses</span>
+                    <span className="text-[10px] text-emerald-800 font-bold uppercase block tracking-wide">Record Unik Tersimpan</span>
                     <span className="text-2xl font-black text-emerald-700 font-mono block mt-1">{hasilUploadRingkasan.sukses}</span>
                   </div>
+                  <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl shadow-3xs">
+                    <span className="text-[10px] text-amber-800 font-bold uppercase block tracking-wide">Duplikat Dilewati</span>
+                    <span className="text-2xl font-black text-amber-700 font-mono block mt-1">{hasilUploadRingkasan.duplikatDilewati || 0}</span>
+                  </div>
                   <div className="bg-rose-50 border border-rose-200 p-3 rounded-xl shadow-3xs">
-                    <span className="text-[10px] text-rose-800 font-bold uppercase block tracking-wide">Gagal / Format Error</span>
+                    <span className="text-[10px] text-rose-800 font-bold uppercase block tracking-wide">Dilewati / Format Error</span>
                     <span className="text-2xl font-black text-rose-700 font-mono block mt-1">{hasilUploadRingkasan.gagal}</span>
+                    {hasilUploadRingkasan.dilewatiValidasi > 0 && (
+                      <span className="text-[9px] text-rose-700 font-bold block mt-1">
+                        {hasilUploadRingkasan.dilewatiValidasi} baris gagal validasi sumber
+                      </span>
+                    )}
+                    {hasilUploadRingkasan.slsDilewati > 0 && (
+                      <span className="text-[9px] text-rose-700 font-bold block mt-1">
+                        {hasilUploadRingkasan.slsDilewati} baris ID Sub-SLS tidak ada di master
+                      </span>
+                    )}
                   </div>
                 </div>
 
