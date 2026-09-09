@@ -38,15 +38,20 @@ export default function DashboardLapangan() {
     return new Date(stringTanggal).toLocaleDateString('id-ID', opsi);
   };
 
+  const normalisasiTeks = (nilai) => String(nilai ?? '').trim().toLowerCase();
+
   const getInfoAnomali = (kode, tipe = 'deskripsi') => {
-    const target = masterAnomali.find(a => a.kode === kode);
+    const kodeNormal = String(kode || '').trim().toUpperCase();
+    const target = masterAnomali.find(
+      a => String(a.kode || '').trim().toUpperCase() === kodeNormal
+    );
     if (!target) return kode;
     return tipe === 'deskripsi' ? target.deskripsi : target.aturan_teknis;
   };
 
   const getKategoriDariKode = (kode) => {
     const target = masterAnomali.find(
-      a => String(a.kode).trim().toUpperCase() === String(kode).trim().toUpperCase()
+      a => String(a.kode || '').trim().toUpperCase() === String(kode || '').trim().toUpperCase()
     );
     return String(target?.kategori || '').trim().toUpperCase();
   };
@@ -55,6 +60,14 @@ export default function DashboardLapangan() {
     String(item?.kategori_anomali || item?.kategori || getKategoriDariKode(item?.kode_anomali) || '')
       .trim()
       .toUpperCase();
+
+  // Satu assignment dapat memiliki beberapa anggota keluarga / unit usaha.
+  // Karena itu identitas masalah wajib menyertakan nama_subjek, bukan hanya assignment + kode.
+  const buatKunciMasalah = (item) =>
+    `${normalisasiTeks(item?.assignment_id)}|||${normalisasiTeks(item?.nama_subjek)}|||${normalisasiTeks(item?.kode_anomali)}`;
+
+  const buatKunciSubjek = (item) =>
+    `${normalisasiTeks(item?.assignment_id)}|||${kategoriItem(item) || 'LAINNYA'}|||${normalisasiTeks(item?.nama_subjek)}`;
 
   const fetchMasterAnomali = async () => {
   try {
@@ -67,8 +80,6 @@ export default function DashboardLapangan() {
     console.log('=== MASTER ANOMALI ===');
     console.table(data);
 
-    console.log('JUMLAH MASTER:', data?.length);
-    console.log('MASTER ANOMALI RAW:', data);
     console.log('JUMLAH MASTER:', data?.length);
     console.log('MASTER ANOMALI RAW:', data);
 
@@ -88,40 +99,59 @@ export default function DashboardLapangan() {
   }
 };
 
-  // --- 1. AMBIL SEMUA DATA MONITORING DEPAN (FETCH SINGLE SOURCE) ---
+  // --- 1. AMBIL SEMUA DATA MONITORING DEPAN DENGAN PAGINATION ---
   const initWorkspaceData = async () => {
     setLoading(true);
     try {
       await fetchMasterAnomali();
 
-      let query = supabaseData.from('view_monitoring_anomali').select('*');
-      if (profilUser?.role === 'PML') {
-        query = query.eq('pml_email', profilUser.email);
-      } else if (profilUser?.role === 'PCL') {
-        query = query.eq('pcl_email', profilUser.email);
+      // PostgREST/Supabase umumnya membatasi jumlah row per request.
+      // Ambil per 1.000 row agar anomali besar (AK/AU) tidak terpotong.
+      const pageSize = 1000;
+      let from = 0;
+      const semuaRows = [];
+
+      while (true) {
+        let query = supabaseData
+          .from('view_monitoring_anomali')
+          .select('*')
+          .order('anomali_id', { ascending: true })
+          .range(from, from + pageSize - 1);
+
+        if (profilUser?.role === 'PML') {
+          query = query.eq('pml_email', profilUser.email);
+        } else if (profilUser?.role === 'PCL') {
+          query = query.eq('pcl_email', profilUser.email);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+
+        const batch = data || [];
+        semuaRows.push(...batch);
+
+        console.log(
+          `📦 FETCH LAPANGAN ${from}-${from + pageSize - 1}: ${batch.length} row`
+        );
+
+        if (batch.length < pageSize) break;
+        from += pageSize;
       }
 
-      const { data, error } = await query;
-      if (error) throw error;
+      console.log('✅ TOTAL DATA MONITORING LAPANGAN:', semuaRows.length);
 
-      // Simpan daftar snapshot dari seluruh data agar pilihan "Anomali Terakhir"
-      // tetap mengacu ke rilis terbaru, meskipun semua anomali pada rilis itu sudah FASIH.
-      const semuaRows = data || [];
-
-      // PML dan PCL hanya menampilkan anomali yang BELUM ditindaklanjuti di FASIH.
-      // Data yang sudah berstatus "Sudah Tindak Lanjut FASIH" tidak masuk workspace lapangan.
+      // Workspace Lapangan hanya berisi anomali yang belum dikonfirmasi petugas
+      // dan belum ditindaklanjuti di FASIH.
       const dbRows = semuaRows.filter(
-  item =>
-    String(item.status_fasih || '').trim() ===
-      'Belum Tindak Lanjut FASIH' &&
-    String(item.status_konfirmasi || '').trim() ===
-      'Belum Tindak Lanjut'
-);
+        item =>
+          String(item.status_fasih || '').trim() === 'Belum Tindak Lanjut FASIH' &&
+          String(item.status_konfirmasi || '').trim() === 'Belum Tindak Lanjut'
+      );
 
       setRawMonitoringData(dbRows);
 
-      // Daftar tanggal tetap diambil dari seluruh data (bukan hanya data yang belum FASIH)
-      // supaya snapshot terbaru tidak bergeser ke tanggal lama.
+      // Daftar tanggal tetap berasal dari seluruh data agar rilis terbaru tidak
+      // bergeser hanya karena semua anomali pada rilis tersebut sudah selesai.
       const daftarTanggal = [...new Set(semuaRows.map(item => item.tanggal_snapshot))]
         .filter(Boolean)
         .sort((a, b) => b.localeCompare(a));
@@ -129,11 +159,15 @@ export default function DashboardLapangan() {
       setAvailableSnapshots(daftarTanggal);
 
       if (profilUser?.role === 'PCL') {
-        setSelectedPcl({ email: profilUser.email, nama_petugas: profilUser.nama_pengguna });
+        setSelectedPcl({
+          email: profilUser.email,
+          nama_petugas: profilUser.nama_pengguna
+        });
       }
 
     } catch (err) {
       console.error('Gagal memuat workspace lapangan:', err.message);
+      alert('Gagal memuat Dashboard Lapangan: ' + (err?.message || err));
     } finally {
       setLoading(false);
     }
@@ -157,175 +191,268 @@ export default function DashboardLapangan() {
 
   // --- REKAP AGREGAT PCL (LEVEL 0 PML) BERDASARKAN SNAPSHOT ---
   useEffect(() => {
-    if (profilUser?.role !== 'PML' || rawMonitoringData.length === 0) return;
+    if (profilUser?.role !== 'PML') return;
+
+    if (rawMonitoringData.length === 0) {
+      setDaftarPclAgregat([]);
+      return;
+    }
 
     const dataTerfilter = getFilteredRawBySnapshot(rawMonitoringData, selectedSnapshot);
 
     const hitungPcl = async () => {
-      const { data: pclData } = await supabaseData
-        .from('petugas')
-        .select('email, nama_petugas, posisi_tugas')
-        .eq('id_pml_atasan', profilUser.email);
+      try {
+        const { data: pclData, error: errorPcl } = await supabaseData
+          .from('petugas')
+          .select('email, nama_petugas, posisi_tugas')
+          .eq('id_pml_atasan', profilUser.email);
 
-      if (!pclData) return;
+        if (errorPcl) throw errorPcl;
+        if (!pclData?.length) {
+          setDaftarPclAgregat([]);
+          return;
+        }
 
-      const { data: slsData } = await supabaseData
-        .from('muatan_sls')
-        .select('idsubsls, petugas_id')
-        .in('petugas_id', pclData.map(p => p.email));
+        const { data: slsData, error: errorSls } = await supabaseData
+          .from('muatan_sls')
+          .select('idsubsls, petugas_id')
+          .in('petugas_id', pclData.map(p => p.email));
 
-      const mappedPcl = pclData.map(pcl => {
-        const slsOwns = slsData ? slsData.filter(s => s.petugas_id === pcl.email).map(s => s.idsubsls) : [];
-        const anomaliOwns = dataTerfilter.filter(a => slsOwns.includes(a.idsubsls));
-        
-        const kunciUnikSet = new Set(anomaliOwns.map(a => `${a.assignment_id}_${a.kode_anomali}`));
-        const totalMasalahUnik = kunciUnikSet.size;
+        if (errorSls) throw errorSls;
 
-        let belumSelesaiUnik = 0;
-        kunciUnikSet.forEach(kunci => {
-          const barisTerkait = anomaliOwns.filter(a => `${a.assignment_id}_${a.kode_anomali}` === kunci);
-          if (barisTerkait.some(b => b.status_konfirmasi === 'Belum Tindak Lanjut')) {
-            belumSelesaiUnik++;
-          }
+        const slsByPcl = new Map();
+        (slsData || []).forEach(sls => {
+          const email = normalisasiTeks(sls.petugas_id);
+          if (!slsByPcl.has(email)) slsByPcl.set(email, new Set());
+          slsByPcl.get(email).add(String(sls.idsubsls));
         });
 
-        return {
-          ...pcl,
-          totalBeban: totalMasalahUnik,
-          belumSelesai: belumSelesaiUnik,
-          sudahSelesai: Math.max(0, totalMasalahUnik - belumSelesaiUnik),
-          jumlahSls: slsOwns.length
-        };
-      });
+        const mappedPcl = pclData.map(pcl => {
+          const slsOwns = slsByPcl.get(normalisasiTeks(pcl.email)) || new Set();
+          const anomaliOwns = dataTerfilter.filter(a => slsOwns.has(String(a.idsubsls)));
 
-      // Hanya tampilkan PCL yang masih memiliki anomali Belum Tindak Lanjut FASIH
-      const pclMasihAdaBelumFasih = mappedPcl.filter(pcl => pcl.totalBeban > 0);
+          const grupMasalah = new Map();
+          anomaliOwns.forEach(a => {
+            const kunci = buatKunciMasalah(a);
+            if (!grupMasalah.has(kunci)) grupMasalah.set(kunci, []);
+            grupMasalah.get(kunci).push(a);
+          });
 
-      pclMasihAdaBelumFasih.sort((a, b) => b.belumSelesai - a.belumSelesai);
-      setDaftarPclAgregat(pclMasihAdaBelumFasih);
+          const totalMasalahUnik = grupMasalah.size;
+          let belumSelesaiUnik = 0;
+
+          grupMasalah.forEach(barisTerkait => {
+            if (barisTerkait.some(b => b.status_konfirmasi === 'Belum Tindak Lanjut')) {
+              belumSelesaiUnik++;
+            }
+          });
+
+          return {
+            ...pcl,
+            totalBeban: totalMasalahUnik,
+            belumSelesai: belumSelesaiUnik,
+            sudahSelesai: Math.max(0, totalMasalahUnik - belumSelesaiUnik),
+            jumlahSls: slsOwns.size
+          };
+        });
+
+        const pclMasihAdaBelumFasih = mappedPcl.filter(pcl => pcl.totalBeban > 0);
+        pclMasihAdaBelumFasih.sort((a, b) => b.belumSelesai - a.belumSelesai);
+        setDaftarPclAgregat(pclMasihAdaBelumFasih);
+      } catch (err) {
+        console.error('Gagal menghitung agregat PCL:', err);
+        setDaftarPclAgregat([]);
+      }
     };
 
     hitungPcl();
-  }, [selectedSnapshot, rawMonitoringData, profilUser?.role]);
+  }, [selectedSnapshot, rawMonitoringData, profilUser?.role, profilUser?.email]);
 
   // --- REKAP DAFTAR SLS (LEVEL 1 PCL/PML) BERDASARKAN SNAPSHOT ---
   useEffect(() => {
-    if (!selectedPcl || rawMonitoringData.length === 0) return;
+    if (!selectedPcl) return;
+
+    if (rawMonitoringData.length === 0) {
+      setDaftarSls([]);
+      return;
+    }
 
     const dataTerfilter = getFilteredRawBySnapshot(rawMonitoringData, selectedSnapshot);
 
     const hitungSls = async () => {
-      const { data: slsData } = await supabaseData
-        .from('muatan_sls')
-        .select('idsubsls, nmsls, nmdesa, nmkec')
-        .eq('petugas_id', selectedPcl.email);
+      try {
+        const { data: slsData, error } = await supabaseData
+          .from('muatan_sls')
+          .select('idsubsls, nmsls, nmdesa, nmkec')
+          .eq('petugas_id', selectedPcl.email);
 
-      if (!slsData) return;
+        if (error) throw error;
+        if (!slsData) {
+          setDaftarSls([]);
+          return;
+        }
 
-      const slsMapped = slsData.map(sls => {
-        const itemAnomali = dataTerfilter.filter(a => a.idsubsls === sls.idsubsls);
-        const kunciUnikSet = new Set(itemAnomali.map(a => `${a.assignment_id}_${a.kode_anomali}`));
-        
-        let belumSelesaiUnik = 0;
-        kunciUnikSet.forEach(kunci => {
-          const barisTerkait = itemAnomali.filter(a => `${a.assignment_id}_${a.kode_anomali}` === kunci);
-          if (barisTerkait.some(b => b.status_konfirmasi === 'Belum Tindak Lanjut')) {
-            belumSelesaiUnik++;
-          }
+        const slsMapped = slsData.map(sls => {
+          const itemAnomali = dataTerfilter.filter(
+            a => String(a.idsubsls) === String(sls.idsubsls)
+          );
+
+          const grupMasalah = new Map();
+          itemAnomali.forEach(a => {
+            const kunci = buatKunciMasalah(a);
+            if (!grupMasalah.has(kunci)) grupMasalah.set(kunci, []);
+            grupMasalah.get(kunci).push(a);
+          });
+
+          let belumSelesaiUnik = 0;
+          grupMasalah.forEach(barisTerkait => {
+            if (barisTerkait.some(b => b.status_konfirmasi === 'Belum Tindak Lanjut')) {
+              belumSelesaiUnik++;
+            }
+          });
+
+          return {
+            ...sls,
+            totalAnomali: grupMasalah.size,
+            belumSelesai: belumSelesaiUnik
+          };
         });
 
-        return {
-          ...sls,
-          totalAnomali: kunciUnikSet.size,
-          belumSelesai: belumSelesaiUnik
-        };
-      });
-
-      // Hanya tampilkan SLS yang masih memiliki anomali Belum Tindak Lanjut FASIH
-      const slsMasihAdaBelumFasih = slsMapped.filter(sls => sls.totalAnomali > 0);
-
-      slsMasihAdaBelumFasih.sort((a, b) => b.belumSelesai - a.belumSelesai);
-      setDaftarSls(slsMasihAdaBelumFasih);
+        const slsMasihAdaBelumFasih = slsMapped.filter(sls => sls.totalAnomali > 0);
+        slsMasihAdaBelumFasih.sort((a, b) => b.belumSelesai - a.belumSelesai);
+        setDaftarSls(slsMasihAdaBelumFasih);
+      } catch (err) {
+        console.error('Gagal menghitung daftar SLS:', err);
+        setDaftarSls([]);
+      }
     };
 
     hitungSls();
   }, [selectedPcl, selectedSnapshot, rawMonitoringData]);
 
-  // --- LOAD DETAIL ANOMALI SLS DENGAN PILIHAN SNAPSHOT (LEVEL 2) ---
+  // --- LOAD DETAIL ANOMALI SLS DENGAN IDENTITAS SUBJEK YANG AMAN ---
   const loadDetailAnomaliSls = (slsObj) => {
     setSelectedSls(slsObj);
-    
-    // Ambil data lokal untuk SLS terpilih
-    const dataSub = rawMonitoringData.filter(item => item.idsubsls === slsObj.idsubsls);
 
-    const grupRuta = {};
+    // Tetap simpan histori seluruh snapshot untuk subjek yang sama agar pita tanggal
+    // dapat ditampilkan. Pengelompokan memakai assignment + kategori + nama_subjek.
+    const dataSub = rawMonitoringData.filter(
+      item => String(item.idsubsls) === String(slsObj.idsubsls)
+    );
+
+    const grupSubjek = {};
+
     dataSub.forEach(item => {
-      if (!grupRuta[item.assignment_id]) {
-        grupRuta[item.assignment_id] = {
+      const namaSubjek = String(item.nama_subjek || '').trim() || '(Tanpa Nama Subjek)';
+      const kategoriBaris = kategoriItem(item) || 'LAINNYA';
+      const subjekKey = buatKunciSubjek({ ...item, nama_subjek: namaSubjek });
+
+      if (!grupSubjek[subjekKey]) {
+        grupSubjek[subjekKey] = {
+          subjek_key: subjekKey,
           assignment_id: item.assignment_id,
-          nama_keluarga_krt: '', 
-          nama_unit_usaha: '',   
-          fallback_nama: item.nama_subjek, 
-          daftar_error_grup: {} 
+          nama_subjek: namaSubjek,
+          kategori_subjek: kategoriBaris,
+          daftar_error_grup: {}
         };
       }
 
-      const kategoriBaris = kategoriItem(item);
-      if (kategoriBaris === 'KELUARGA') {
-        grupRuta[item.assignment_id].nama_keluarga_krt = item.nama_subjek;
-      } else if (kategoriBaris === 'USAHA') {
-        grupRuta[item.assignment_id].nama_unit_usaha = item.nama_subjek;
-      }
+      const compositeErrorKey = String(item.kode_anomali || '').trim().toUpperCase();
 
-      const compositeErrorKey = item.kode_anomali;
-
-      if (!grupRuta[item.assignment_id].daftar_error_grup[compositeErrorKey]) {
-        grupRuta[item.assignment_id].daftar_error_grup[compositeErrorKey] = {
+      if (!grupSubjek[subjekKey].daftar_error_grup[compositeErrorKey]) {
+        grupSubjek[subjekKey].daftar_error_grup[compositeErrorKey] = {
           kode_anomali: item.kode_anomali,
-          kategori: item.kategori_anomali,
+          kategori: kategoriBaris,
+          nama_subjek: namaSubjek,
           tipe_masalah: item.tipe_masalah || 'ANOMALI',
           status_konfirmasi: item.status_konfirmasi || 'Belum Tindak Lanjut',
           catatan_lapangan: item.catatan_lapangan || '',
-          snapshots: [] 
+          snapshots: []
         };
       }
 
-      grupRuta[item.assignment_id].daftar_error_grup[compositeErrorKey].snapshots.push({
-        anomali_id: item.anomali_id,
-        tanggal_snapshot: item.tanggal_snapshot,
-        status_konfirmasi: item.status_konfirmasi || 'Belum Tindak Lanjut'
-      });
+      const grupError = grupSubjek[subjekKey].daftar_error_grup[compositeErrorKey];
+
+      // Hindari duplikasi anomali_id jika ada data legacy yang terbaca ganda dari view.
+      if (!grupError.snapshots.some(s => s.anomali_id === item.anomali_id)) {
+        grupError.snapshots.push({
+          anomali_id: item.anomali_id,
+          tanggal_snapshot: item.tanggal_snapshot,
+          status_konfirmasi: item.status_konfirmasi || 'Belum Tindak Lanjut'
+        });
+      }
 
       if (item.status_konfirmasi === 'Belum Tindak Lanjut') {
-        grupRuta[item.assignment_id].daftar_error_grup[compositeErrorKey].status_konfirmasi = 'Belum Tindak Lanjut';
+        grupError.status_konfirmasi = 'Belum Tindak Lanjut';
+        grupError.catatan_lapangan = item.catatan_lapangan || grupError.catatan_lapangan || '';
       }
     });
 
-    const finalRutaFlattened = Object.values(grupRuta).map(ruta => ({
-      ...ruta,
-      daftar_error: Object.values(ruta.daftar_error_grup).map(errGrup => ({
-        ...errGrup,
-        snapshots: errGrup.snapshots.sort((a, b) => String(a.tanggal_snapshot).localeCompare(String(b.tanggal_snapshot)))
+    const finalSubjek = Object.values(grupSubjek)
+      .map(subjek => ({
+        ...subjek,
+        daftar_error: Object.values(subjek.daftar_error_grup)
+          .map(errGrup => ({
+            ...errGrup,
+            snapshots: errGrup.snapshots.sort(
+              (a, b) => String(a.tanggal_snapshot).localeCompare(String(b.tanggal_snapshot))
+            )
+          }))
+          .sort((a, b) => String(a.kode_anomali).localeCompare(String(b.kode_anomali)))
       }))
-    }));
+      .sort((a, b) => String(a.nama_subjek).localeCompare(String(b.nama_subjek), 'id'));
 
-    setDaftarAnomaliRuta(finalRutaFlattened);
+    setDaftarAnomaliRuta(finalSubjek);
   };
 
-  const handleOpenActionModal = (subAnomali, namaSubjek, assignmentId) => {
-    setEditingAnomali({ ...subAnomali, nama_subjek: namaSubjek, assignment_id: assignmentId });
-    setStatusKonfirmasiForm(subAnomali.status_konfirmasi === 'Belum Tindak Lanjut' ? 'Sesuai Kondisi Lapangan' : subAnomali.status_konfirmasi);
+  const handleOpenActionModal = (subAnomali, namaSubjek, assignmentId, subjekKey) => {
+    let snapshotTarget = selectedSnapshot;
+
+    if (selectedSnapshot === 'terakhir') {
+      snapshotTarget = availableSnapshots[0] || null;
+    } else if (selectedSnapshot === 'semua') {
+      // Pada mode seluruh riwayat, tombol konfirmasi diarahkan ke snapshot terbaru
+      // milik masalah/subjek tersebut agar histori lama tidak ikut berubah.
+      snapshotTarget = [...(subAnomali.snapshots || [])]
+        .map(s => s.tanggal_snapshot)
+        .filter(Boolean)
+        .sort((a, b) => b.localeCompare(a))[0] || null;
+    }
+
+    const snapshotsTarget = (subAnomali.snapshots || []).filter(
+      snap => snap.tanggal_snapshot === snapshotTarget
+    );
+
+    if (!snapshotTarget || snapshotsTarget.length === 0) {
+      alert('Snapshot target tidak ditemukan. Silakan segarkan Dashboard Lapangan.');
+      return;
+    }
+
+    setEditingAnomali({
+      ...subAnomali,
+      nama_subjek: namaSubjek,
+      assignment_id: assignmentId,
+      subjek_key: subjekKey,
+      snapshot_target: snapshotTarget,
+      snapshots: snapshotsTarget
+    });
+
+    setStatusKonfirmasiForm(
+      subAnomali.status_konfirmasi === 'Belum Tindak Lanjut'
+        ? 'Sesuai Kondisi Lapangan'
+        : subAnomali.status_konfirmasi
+    );
     setCatatanLapanganForm(subAnomali.catatan_lapangan || '');
   };
 
-  // --- SAVE TINDAK LANJUT DENGAN EFEK DOMINO OTOMATIS LINIMASA ---
+  // --- SAVE TINDAK LANJUT HANYA UNTUK SUBJEK + KODE + SNAPSHOT AKTIF ---
   const handleSaveTindakLanjut = async () => {
     if (!catatanLapanganForm.trim()) {
       return alert('Catatan lapangan/konfirmasi wajib diisi!');
     }
 
-    if (!editingAnomali?.snapshots?.length) {
-      return alert('Data anomali tidak memiliki ID tindak lanjut yang valid. Silakan muat ulang halaman.');
+    if (!editingAnomali?.snapshots?.length || !editingAnomali?.snapshot_target) {
+      return alert('Data snapshot tindak lanjut tidak valid. Silakan muat ulang halaman.');
     }
 
     setSubmitting(true);
@@ -335,17 +462,14 @@ export default function DashboardLapangan() {
 
       console.log('=== SIMPAN KONFIRMASI PCL ===');
       console.log('Assignment:', editingAnomali.assignment_id);
+      console.log('Subjek:', editingAnomali.nama_subjek);
       console.log('Kode:', editingAnomali.kode_anomali);
-      console.log('Snapshot target:', editingAnomali.snapshots);
+      console.log('Snapshot target:', editingAnomali.snapshot_target);
 
-      // tindak_lanjut_anomali sudah dibuat saat anomali_data masuk.
-      // Karena itu gunakan UPDATE, bukan UPSERT.
-      // Ini menghindari jalur INSERT/RLS dan memastikan kita benar-benar
-      // mengubah baris yang sudah ada.
       const hasilUpdate = await Promise.all(
         editingAnomali.snapshots.map(async (snap) => {
           if (!snap.anomali_id) {
-            throw new Error('anomali_id tidak ditemukan pada data snapshot.');
+            throw new Error('anomali_id tidak ditemukan pada snapshot target.');
           }
 
           const { data, error } = await supabaseData
@@ -362,10 +486,7 @@ export default function DashboardLapangan() {
             )
             .single();
 
-          if (error) {
-            throw error;
-          }
-
+          if (error) throw error;
           if (!data) {
             throw new Error(
               `Baris tindak lanjut untuk anomali_id ${snap.anomali_id} tidak berhasil diperbarui.`
@@ -378,64 +499,59 @@ export default function DashboardLapangan() {
 
       console.log('✅ HASIL UPDATE KONFIRMASI:', hasilUpdate);
 
-      // Update cache lokal setelah database benar-benar berhasil.
+      const idYangSelesai = new Set(hasilUpdate.map(item => item.anomali_id));
+
+      // Workspace hanya menampilkan Belum Tindak Lanjut. Setelah dikonfirmasi,
+      // keluarkan row snapshot tersebut dari cache lokal agar jumlah antrean langsung turun.
       setRawMonitoringData(prev =>
-        prev.map(item => {
-          const match = editingAnomali.snapshots.some(
-            s => s.anomali_id === item.anomali_id
-          );
-
-          if (match) {
-            return {
-              ...item,
-              status_konfirmasi: statusKonfirmasiForm,
-              catatan_lapangan: catatanLapanganForm.trim(),
-              dkonfirmasi_oleh_email: profilUser?.email,
-              tanggal_konfirmasi: waktuKonfirmasi
-            };
-          }
-
-          return item;
-        })
+        prev.filter(item => !idYangSelesai.has(item.anomali_id))
       );
 
+      // Sinkronkan detail yang sedang terbuka tanpa mengubah snapshot lain.
       setDaftarAnomaliRuta(prevRuta =>
-        prevRuta.map(ruta => {
-          if (ruta.assignment_id !== editingAnomali.assignment_id) {
-            return ruta;
-          }
+        prevRuta
+          .map(subjek => {
+            if (subjek.subjek_key !== editingAnomali.subjek_key) return subjek;
 
-          return {
-            ...ruta,
-            daftar_error: ruta.daftar_error.map(err => {
-              if (err.kode_anomali !== editingAnomali.kode_anomali) {
-                return err;
-              }
+            const daftarErrorBaru = subjek.daftar_error
+              .map(err => {
+                if (String(err.kode_anomali) !== String(editingAnomali.kode_anomali)) {
+                  return err;
+                }
 
-              return {
-                ...err,
-                status_konfirmasi: statusKonfirmasiForm,
-                catatan_lapangan: catatanLapanganForm.trim(),
-                snapshots: err.snapshots.map(s => ({
-                  ...s,
-                  status_konfirmasi: statusKonfirmasiForm
-                }))
-              };
-            })
-          };
-        })
+                const snapshotTersisa = err.snapshots.filter(
+                  snap => !idYangSelesai.has(snap.anomali_id)
+                );
+
+                return {
+                  ...err,
+                  snapshots: snapshotTersisa,
+                  status_konfirmasi: snapshotTersisa.length
+                    ? 'Belum Tindak Lanjut'
+                    : statusKonfirmasiForm,
+                  catatan_lapangan: snapshotTersisa.length
+                    ? err.catatan_lapangan
+                    : catatanLapanganForm.trim()
+                };
+              })
+              .filter(err => err.snapshots.length > 0);
+
+            return {
+              ...subjek,
+              daftar_error: daftarErrorBaru
+            };
+          })
+          .filter(subjek => subjek.daftar_error.length > 0)
       );
 
-      alert('Konfirmasi lapangan berhasil disimpan.');
+      alert(
+        `Konfirmasi lapangan berhasil disimpan untuk snapshot ${formatTanggalIndo(editingAnomali.snapshot_target)}.`
+      );
       setEditingAnomali(null);
 
     } catch (err) {
       console.error('❌ GAGAL SIMPAN KONFIRMASI PCL:', err);
-
-      alert(
-        'Gagal menyimpan konfirmasi lapangan: ' +
-        (err?.message || err)
-      );
+      alert('Gagal menyimpan konfirmasi lapangan: ' + (err?.message || err));
     } finally {
       setSubmitting(false);
     }
@@ -509,7 +625,7 @@ export default function DashboardLapangan() {
               onChange={(e) => setSelectedSnapshot(e.target.value)}
               className="bg-white font-bold border border-stone-300 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-amber-600 cursor-pointer shadow-3xs"
             >
-              <option value="terakhir">🌟 Anomai Terakhir ({availableSnapshots[0] ? formatTanggalIndo(availableSnapshots[0]) : '-'})</option>
+              <option value="terakhir">🌟 Anomali Terakhir ({availableSnapshots[0] ? formatTanggalIndo(availableSnapshots[0]) : '-'})</option>
               <option value="semua">📚 Semua Anomali (Akumulasi)</option>
               <optgroup label="-- Riwayat Anomali --">
                 {availableSnapshots.map(tgl => (
@@ -605,7 +721,7 @@ export default function DashboardLapangan() {
               <div>
                 <span className="text-amber-300/70 text-[10px] block uppercase font-bold tracking-wider">Nama SLS:</span>
                 <h3 className="font-black text-sm sm:text-base text-amber-200">{selectedSls.nmsls}</h3>
-                <p className="text-xs text-amber-100/70 font-medium mt-0.5">Desa {selectedSls.nmdesa} • Ditemukan {daftarAnomaliRuta.length} Anomali</p>
+                <p className="text-xs text-amber-100/70 font-medium mt-0.5">Desa {selectedSls.nmdesa} • Ditemukan {daftarAnomaliRuta.length} Subjek</p>
               </div>
 
               {/* FILTER TAB UNTUK PENELUSURAN MASALAH */}
@@ -658,27 +774,33 @@ export default function DashboardLapangan() {
 
                 if (errorTerfilter.length === 0) return null;
 
-                const anomaliKeluarga = errorTerfilter.filter(err => kategoriItem(err) === 'KELUARGA');
-                const anomaliUsaha = errorTerfilter.filter(err => kategoriItem(err) === 'USAHA');
-                const modeBersarang = anomaliKeluarga.length > 0 && anomaliUsaha.length > 0;
-                const teksHeaderUtama = ruta.nama_keluarga_krt || ruta.fallback_nama;
+                const kategoriSubjek = String(ruta.kategori_subjek || '').toUpperCase();
+                const isRutaUsaha = kategoriSubjek === 'USAHA';
+                const isRutaKeluarga = kategoriSubjek === 'KELUARGA';
+                const labelSubjek = isRutaUsaha
+                  ? 'Nama Usaha / Perusahaan'
+                  : isRutaKeluarga
+                    ? 'Nama Anggota Keluarga'
+                    : 'Nama Subjek';
 
                 return (
-                  <div key={ruta.assignment_id} className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden hover:shadow-md transition-shadow">
+                  <div key={ruta.subjek_key} className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden hover:shadow-md transition-shadow">
                     <div className="p-4 bg-stone-50 border-b border-stone-100 flex justify-between items-start gap-3">
                       <div className="space-y-1 max-w-[70%]">
-                        <span className="text-[9px] font-bold text-slate-400 block uppercase tracking-wide">Nama Subjek / Kepala RT</span>
-                        <h4 className="font-extrabold text-slate-900 text-sm sm:text-base leading-tight">🧑 {teksHeaderUtama}</h4>
-                        {ruta.nama_unit_usaha && (
-                          <div className="pt-1">
-                            <span className="text-[9px] font-bold text-amber-700/80 block uppercase tracking-wide">Nama Institusi/Usaha:</span>
-                            <p className="text-xs font-bold text-amber-900 bg-amber-50 px-2 py-0.5 rounded border border-amber-200/80 inline-block mt-0.5">🏢 {ruta.nama_unit_usaha}</p>
-                          </div>
-                        )}
+                        <span className="text-[9px] font-bold text-slate-400 block uppercase tracking-wide">{labelSubjek}</span>
+                        <h4 className="font-extrabold text-slate-900 text-sm sm:text-base leading-tight">
+                          {isRutaUsaha ? '🏢' : '🧑'} {ruta.nama_subjek}
+                        </h4>
                         <span className="text-[10px] text-slate-400 font-mono block pt-1">ID: {ruta.assignment_id}</span>
                       </div>
                       <div className="shrink-0">
-                        {modeBersarang ? <span className="bg-orange-100 text-orange-800 font-black text-[9px] px-2.5 py-0.5 rounded uppercase tracking-wider border border-orange-200/60 shadow-3xs">Keluarga & Usaha</span> : anomaliUsaha.length > 0 ? <span className="bg-amber-100 text-amber-800 font-black text-[9px] px-2.5 py-0.5 rounded uppercase tracking-wider border border-amber-200/60 shadow-3xs">Usaha</span> : <span className="bg-stone-100 text-stone-700 font-black text-[9px] px-2.5 py-0.5 rounded uppercase tracking-wider border border-stone-200/60 shadow-3xs">Keluarga</span>}
+                        {isRutaUsaha ? (
+                          <span className="bg-amber-100 text-amber-800 font-black text-[9px] px-2.5 py-0.5 rounded uppercase tracking-wider border border-amber-200/60 shadow-3xs">Usaha</span>
+                        ) : isRutaKeluarga ? (
+                          <span className="bg-stone-100 text-stone-700 font-black text-[9px] px-2.5 py-0.5 rounded uppercase tracking-wider border border-stone-200/60 shadow-3xs">Keluarga</span>
+                        ) : (
+                          <span className="bg-slate-100 text-slate-700 font-black text-[9px] px-2.5 py-0.5 rounded uppercase tracking-wider border border-slate-200/60 shadow-3xs">Subjek</span>
+                        )}
                       </div>
                     </div>
 
@@ -708,7 +830,7 @@ export default function DashboardLapangan() {
                         });
 
                         return (
-                          <div key={err.kode_anomali} className={`pt-3 pb-2 px-2.5 rounded-xl border transition-all ${warnaBarisBg} ${i === 0 ? 'mt-0' : 'mt-2'} space-y-2.5`}>
+                          <div key={`${ruta.subjek_key}_${err.kode_anomali}`} className={`pt-3 pb-2 px-2.5 rounded-xl border transition-all ${warnaBarisBg} ${i === 0 ? 'mt-0' : 'mt-2'} space-y-2.5`}>
                             <div className="flex justify-between items-start gap-3">
                               <div className="flex items-start gap-2.5">
                                 <span className={`font-black px-2 py-0.5 rounded-md text-[10px] shrink-0 mt-0.5 shadow-3xs text-white ${
@@ -766,7 +888,7 @@ export default function DashboardLapangan() {
 
                             <div className="flex justify-end pt-0.5">
                               <button 
-                                onClick={() => handleOpenActionModal(err, isUsha ? `${ruta.nama_unit_usaha || teksHeaderUtama} (Usaha)` : teksHeaderUtama, ruta.assignment_id)} 
+                                onClick={() => handleOpenActionModal(err, ruta.nama_subjek, ruta.assignment_id, ruta.subjek_key)} 
                                 className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all shadow-xs ${
                                   isBelumTuntas 
                                     ? (isMissingValue ? 'bg-sky-600 hover:bg-sky-700 text-white' : 'bg-amber-600 hover:bg-amber-700 text-white') 
@@ -796,6 +918,9 @@ export default function DashboardLapangan() {
               <div className="space-y-0.5">
                 <span className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Lembar Justifikasi Data</span>
                 <h4 className="text-sm font-bold text-slate-900 leading-tight">{editingAnomali.nama_subjek}</h4>
+                <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">
+                  {kategoriItem(editingAnomali) || 'SUBJEK'} • Snapshot {formatTanggalIndo(editingAnomali.snapshot_target)}
+                </div>
                 <div className="text-[11px] text-slate-500 font-medium bg-stone-100 px-2.5 py-1 rounded-md inline-block mt-1">
                   Anomali {editingAnomali.kode_anomali}: <span className="font-bold text-slate-700">{getInfoAnomali(editingAnomali.kode_anomali, 'deskripsi')}</span>
                 </div>
@@ -805,7 +930,7 @@ export default function DashboardLapangan() {
 
             <div className="space-y-3.5">
               <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-xl text-[11px] leading-relaxed text-amber-950 font-medium">
-                💡 <strong>Informasi Sinkronisasi Linimasa:</strong> Kelompok anomali ini terdeteksi sebanyak <span className="font-black underline">{editingAnomali.snapshots?.length || 1} kali</span> di server pusat. Mengisi konfirmasi di bawah akan otomatis melunasi antrean untuk semua tanggal snapshot terkait.
+                💡 <strong>Snapshot yang dikonfirmasi:</strong> {formatTanggalIndo(editingAnomali.snapshot_target)}. Konfirmasi ini hanya berlaku untuk subjek, kode anomali, dan snapshot tersebut. Riwayat snapshot lain tetap tersimpan.
               </div>
 
               <div>
