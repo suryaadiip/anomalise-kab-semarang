@@ -978,7 +978,6 @@ export default function DashboardLapangan() {
                   {masterAnomali.filter(a => String(a.kode).startsWith('M') || a.deskripsi.toLowerCase().includes('kosong')).map(item => (
                     <div key={item.kode} className="bg-sky-50/50 p-3 rounded-xl border border-sky-200 space-y-1">
                       <span className="font-bold text-sky-950 block">M[{item.kode}]. {item.deskripsi}</span>
-                      <p className="text-[11px] text-sky-900/90 leading-normal">{item.aturan_teknis}</p>
                     </div>
                   ))}
                   {masterAnomali.filter(a => String(a.kode).startsWith('M') || a.deskripsi.toLowerCase().includes('kosong')).length === 0 && (
@@ -993,7 +992,6 @@ export default function DashboardLapangan() {
                   {masterAnomali.filter(a => String(a.kategori || '').toUpperCase() === 'USAHA' && !a.deskripsi.toLowerCase().includes('kosong')).map(item => (
                     <div key={item.kode} className="bg-stone-50 p-3 rounded-xl border border-stone-200/60 space-y-1">
                       <span className="font-bold text-slate-900 block">{item.kode}. {item.deskripsi}</span>
-                      <p className="text-[11px] text-slate-600">{item.aturan_teknis}</p>
                     </div>
                   ))}
                 </div>
@@ -1005,7 +1003,6 @@ export default function DashboardLapangan() {
                   {masterAnomali.filter(a => String(a.kategori || '').toUpperCase() === 'KELUARGA' && !a.deskripsi.toLowerCase().includes('kosong')).map(item => (
                     <div key={item.kode} className="bg-stone-50 p-3 rounded-xl border border-stone-200/60 space-y-1">
                       <span className="font-bold text-slate-900 block">{item.kode}. {item.deskripsi}</span>
-                      <p className="text-[11px] text-slate-600">{item.aturan_teknis}</p>
                     </div>
                   ))}
                 </div>
