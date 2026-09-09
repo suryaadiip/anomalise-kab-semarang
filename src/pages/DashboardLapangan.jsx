@@ -845,10 +845,6 @@ export default function DashboardLapangan() {
                                       <span className="bg-sky-200 text-sky-950 font-black text-[9px] px-1.5 py-0.2 rounded uppercase tracking-wider font-sans shadow-3xs">ISIAN KOSONG</span>
                                     )}
                                   </span>
-                                  <span className="text-[11px] text-amber-900/80 bg-amber-50/60 font-medium block px-2 py-1 rounded-md border border-amber-100/70 mt-1 leading-normal">
-                                    Pedoman Logika: {getInfoAnomali(err.kode_anomali, 'aturan_teknis')}
-                                  </span>
-
                                   {/* PITA LINIMASA SNAPSHOT */}
                                   <div className="pt-2 flex flex-wrap items-center gap-1">
                                     <span className="text-[9px] text-stone-400 font-bold uppercase tracking-wider block mr-1">Tanggal Anomali:</span>
