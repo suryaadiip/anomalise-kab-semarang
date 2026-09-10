@@ -73,6 +73,7 @@ export default function DashboardKantor() {
   const [updatingId, setUpdatingId] = useState(null);
   const [loadingModal, setLoadingModal] = useState(false);
   const [konfirmasiId, setKonfirmasiId] = useState(null);
+  const [permintaanPerbaikanId, setPermintaanPerbaikanId] = useState(null);
 
   const [catatanPegawaiInput, setCatatanPegawaiInput] = useState('');
   const [editingCatatanId, setEditingCatatanId] = useState(null);
@@ -1311,7 +1312,7 @@ export default function DashboardKantor() {
     try {
       const { data: sampelTarget, error } = await supabaseData
         .from('view_monitoring_anomali')
-        .select('anomali_id, assignment_id, nama_subjek, nmdesa, nmsls, nama_pcl, pcl_email, link_fasih, kode_anomali, status_konfirmasi, catatan_lapangan, status_fasih, catatan_pegawai')
+        .select('anomali_id, assignment_id, nama_subjek, nmdesa, nmsls, nama_pcl, pcl_email, link_fasih, kode_anomali, status_konfirmasi, catatan_lapangan, status_fasih, catatan_pegawai, status_monitoring')
         .eq('kdkec', itemObj.kdkec)
         .eq('pml_email', itemObj.pml_email)
         .eq('tanggal_snapshot', itemObj.tanggal_snapshot);
@@ -1353,6 +1354,7 @@ export default function DashboardKantor() {
             catatan_lapangan: a.catatan_lapangan,
             status_fasih: a.status_fasih,
             catatan_pegawai: a.catatan_pegawai,
+            status_monitoring: a.status_monitoring || 'Belum Diperiksa',
           }))
         };
       });
@@ -1386,6 +1388,14 @@ export default function DashboardKantor() {
       const detailAnomaliTarget = targetSubjek?.detailAnomali.find(a => a.anomali_id === anomaliId);
 
       if (!targetSubjek || !detailAnomaliTarget) throw new Error("Data lokal tidak sinkron");
+
+      if (detailAnomaliTarget.status_monitoring === 'Perlu Perbaikan PCL') {
+        throw new Error('Data sedang dikembalikan ke PCL untuk diperbaiki. Tunggu PCL mengirim ulang konfirmasi terlebih dahulu.');
+      }
+
+      if (detailAnomaliTarget.status_konfirmasi === 'Belum Tindak Lanjut' || !detailAnomaliTarget.catatan_lapangan) {
+        throw new Error('Konfirmasi PCL belum lengkap sehingga belum dapat ditandai selesai FASIH.');
+      }
 
       const assignIdIdem = targetSubjek.assignment_id;
       const kodeAnomaliIdem = detailAnomaliTarget.kode;
@@ -1439,7 +1449,12 @@ export default function DashboardKantor() {
                 ...subjek,
                 detailAnomali: subjek.detailAnomali.map(anomali => {
                   if (anomali.kode === kodeAnomaliIdem) {
-                    return { ...anomali, status_fasih: 'Sudah Tindak Lanjut FASIH' };
+                    return {
+                      ...anomali,
+                      status_fasih: 'Sudah Tindak Lanjut FASIH',
+                      status_monitoring: 'Sudah Diperiksa',
+                      catatan_pegawai: catatanPegawaiInput.trim() || anomali.catatan_pegawai || null
+                    };
                   }
                   return anomali;
                 })
@@ -1450,10 +1465,14 @@ export default function DashboardKantor() {
         };
       });
 
+      const idSelesaiSet = new Set((daftarKembar || []).map(item => item.anomali_id));
       setRawViewData(prev => prev.map(row => {
-        const kecocokan = daftarKembar.some(dk => dk.anomali_id === row.anomali_id || (row.assignment_id === assignIdIdem && row.kode_anomali === kodeAnomaliIdem));
-        if (kecocokan) {
-          return { ...row, status_fasih: 'Sudah Tindak Lanjut FASIH', status_konfirmasi: row.status_konfirmasi === 'Belum Tindak Lanjut' ? 'Sesuai Kondisi Lapangan' : row.status_konfirmasi };
+        if (idSelesaiSet.has(row.anomali_id)) {
+          return {
+            ...row,
+            status_fasih: 'Sudah Tindak Lanjut FASIH',
+            status_monitoring: 'Sudah Diperiksa'
+          };
         }
         return row;
       }));
@@ -1464,6 +1483,104 @@ export default function DashboardKantor() {
 
     } catch (err) {
       alert('Gagal memperbarui status: ' + err.message);
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleMintaPerbaikanPcl = async (anomaliId) => {
+    const catatanPerbaikan = catatanPegawaiInput.trim();
+    if (!catatanPerbaikan) {
+      alert('Catatan perbaikan wajib diisi agar PCL mengetahui apa yang harus diperbaiki.');
+      return;
+    }
+
+    setUpdatingId(anomaliId);
+
+    try {
+      const targetSubjek = modalDetailObj?.daftarSubjek?.find(s =>
+        s.detailAnomali.some(a => a.anomali_id === anomaliId)
+      );
+      const detailTarget = targetSubjek?.detailAnomali?.find(a => a.anomali_id === anomaliId);
+
+      if (!targetSubjek || !detailTarget) throw new Error('Data lokal tidak sinkron. Muat ulang dashboard.');
+      if (detailTarget.status_fasih === 'Sudah Tindak Lanjut FASIH') {
+        throw new Error('Data yang sudah selesai FASIH tidak dapat dikembalikan ke PCL.');
+      }
+      if (detailTarget.status_konfirmasi === 'Belum Tindak Lanjut' || !detailTarget.catatan_lapangan) {
+        throw new Error('PCL belum mengirim konfirmasi. Permintaan perbaikan belum diperlukan.');
+      }
+
+      const { data: daftarTarget, error: errCari } = await supabaseData
+        .from('view_monitoring_anomali')
+        .select('anomali_id')
+        .eq('assignment_id', targetSubjek.assignment_id)
+        .eq('nama_subjek', targetSubjek.nama_subjek)
+        .eq('kode_anomali', detailTarget.kode)
+        .eq('tanggal_snapshot', modalDetailObj.tglSnapshot);
+
+      if (errCari) throw errCari;
+      if (!daftarTarget?.length) throw new Error('Data target tidak ditemukan pada snapshot aktif.');
+
+      const waktuPermintaan = new Date().toISOString();
+      const payload = daftarTarget.map(item => ({
+        anomali_id: item.anomali_id,
+        status_monitoring: 'Perlu Perbaikan PCL',
+        catatan_pegawai: catatanPerbaikan,
+        diperiksa_oleh_email: profilUser?.email,
+        tanggal_periksa: waktuPermintaan
+      }));
+
+      const { error: errUpdate } = await supabaseData
+        .from('tindak_lanjut_anomali')
+        .upsert(payload, { onConflict: 'anomali_id' });
+
+      if (errUpdate) throw errUpdate;
+
+      const idTargetSet = new Set(daftarTarget.map(item => item.anomali_id));
+
+      setModalDetailObj(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          daftarSubjek: prev.daftarSubjek.map(subjek => {
+            if (
+              subjek.assignment_id === targetSubjek.assignment_id &&
+              String(subjek.nama_subjek || '').trim().toLowerCase() ===
+                String(targetSubjek.nama_subjek || '').trim().toLowerCase()
+            ) {
+              return {
+                ...subjek,
+                detailAnomali: subjek.detailAnomali.map(anomali =>
+                  anomali.kode === detailTarget.kode
+                    ? {
+                        ...anomali,
+                        status_monitoring: 'Perlu Perbaikan PCL',
+                        catatan_pegawai: catatanPerbaikan
+                      }
+                    : anomali
+                )
+              };
+            }
+            return subjek;
+          })
+        };
+      });
+
+      setRawViewData(prev => prev.map(row =>
+        idTargetSet.has(row.anomali_id)
+          ? { ...row, status_monitoring: 'Perlu Perbaikan PCL' }
+          : row
+      ));
+
+      setPermintaanPerbaikanId(null);
+      setCatatanPegawaiInput('');
+      alert('Permintaan perbaikan berhasil dikirim. Anomali akan muncul kembali di Dashboard Lapangan PCL.');
+
+      fetchDataMonitoringKantor();
+      fetchDetailStatusFasih();
+    } catch (err) {
+      alert('Gagal meminta perbaikan PCL: ' + (err?.message || err));
     } finally {
       setUpdatingId(null);
     }
@@ -2589,8 +2706,13 @@ export default function DashboardKantor() {
                     <div className="divide-y divide-stone-100">
                       {subjek.detailAnomali.map(anomali => {
                         const isSelesaiFasih = anomali.status_fasih === 'Sudah Tindak Lanjut FASIH';
-                        const belumAdaKeteranganLapangan = !anomali.catatan_lapangan || anomali.status_konfirmasi === 'Belum Tindak Lanjut';
-                        const IsSiapEksekusi = !isSelesaiFasih;
+                        const sudahAdaKonfirmasiPcl =
+                          anomali.status_konfirmasi !== 'Belum Tindak Lanjut' && Boolean(anomali.catatan_lapangan);
+                        const sedangMenungguPerbaikanPcl =
+                          anomali.status_monitoring === 'Perlu Perbaikan PCL';
+                        const IsSiapEksekusi =
+                          !isSelesaiFasih && sudahAdaKonfirmasiPcl && !sedangMenungguPerbaikanPcl;
+                        const bisaMintaPerbaikan = IsSiapEksekusi;
                         const isPemicuUtama = anomali.kode === modalDetailObj.kodePemicu;
 
                         const handleCopyTeks = (id, teks) => {
@@ -2626,7 +2748,8 @@ export default function DashboardKantor() {
                                 )}
                                 
                                 {anomali.status_konfirmasi === 'Sesuai Kondisi Lapangan' && <span className="text-[10px] font-extrabold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md border border-emerald-200 shadow-3xs">🟢 Sesuai Lapangan</span>}
-                                {anomali.status_konfirmasi === 'Perlu Perbaikan Data' && <span className="text-[10px] font-extrabold bg-rose-100 text-rose-800 px-2 py-0.5 rounded-md border border-rose-200 shadow-3xs">🔴 Perlu Perbaikan</span>}
+                                {anomali.status_konfirmasi === 'Perlu Perbaikan Data' && <span className="text-[10px] font-extrabold bg-rose-100 text-rose-800 px-2 py-0.5 rounded-md border border-rose-200 shadow-3xs">🔴 Perlu Perbaikan Data</span>}
+                                {sedangMenungguPerbaikanPcl && <span className="text-[9px] font-extrabold bg-rose-600 text-white px-1.5 py-0.5 rounded animate-pulse">↩ MENUNGGU PERBAIKAN PCL</span>}
                                 {IsSiapEksekusi && <span className="text-[9px] font-extrabold bg-amber-600 text-white px-1.5 py-0.5 rounded animate-pulse">SIAP VERIFIKASI</span>}
                               </div>
 
@@ -2698,12 +2821,46 @@ export default function DashboardKantor() {
                             </div>
 
                             <div className="shrink-0 flex items-center md:items-end flex-row md:flex-col justify-between md:justify-start gap-2 pt-2 md:pt-0 border-t md:border-t-0 border-stone-100">
-                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isSelesaiFasih ? 'bg-emerald-100 text-emerald-800' : IsSiapEksekusi ? 'bg-amber-100 text-amber-900 font-extrabold' : 'bg-stone-100 text-stone-500'}`}>{isSelesaiFasih ? '✔ Selesai' : IsSiapEksekusi ? '⏳ Menunggu Anda' : '💤 Belum diisi'}</span>
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                isSelesaiFasih
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : sedangMenungguPerbaikanPcl
+                                    ? 'bg-rose-100 text-rose-800'
+                                    : IsSiapEksekusi
+                                      ? 'bg-amber-100 text-amber-900 font-extrabold'
+                                      : 'bg-stone-100 text-stone-500'
+                              }`}>
+                                {isSelesaiFasih
+                                  ? '✔ Selesai'
+                                  : sedangMenungguPerbaikanPcl
+                                    ? '↩ Menunggu PCL'
+                                    : IsSiapEksekusi
+                                      ? '⏳ Menunggu Anda'
+                                      : '💤 Belum diisi PCL'}
+                              </span>
+
+                              {bisaMintaPerbaikan && (
+                                <button
+                                  type="button"
+                                  disabled={updatingId === anomali.anomali_id}
+                                  onClick={() => {
+                                    setPermintaanPerbaikanId(anomali.anomali_id);
+                                    setCatatanPegawaiInput(anomali.catatan_pegawai || '');
+                                  }}
+                                  className="bg-rose-600 hover:bg-rose-700 text-white font-extrabold px-3 py-1.5 rounded-lg text-xs shadow-md transition-all active:scale-95"
+                                >
+                                  ↩ Minta Perbaikan PCL
+                                </button>
+                              )}
+
                               {IsSiapEksekusi && (
                                 <button 
                                   type="button" 
                                   disabled={updatingId === anomali.anomali_id} 
-                                  onClick={() => setKonfirmasiId(anomali.anomali_id)} 
+                                  onClick={() => {
+                                    setKonfirmasiId(anomali.anomali_id);
+                                    setCatatanPegawaiInput(anomali.catatan_pegawai || '');
+                                  }} 
                                   className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-3 py-1.5 rounded-lg text-xs shadow-md transition-all active:scale-95"
                                 >
                                   {updatingId === anomali.anomali_id ? 'Proses...' : '✔ Sudah FASIH'}
@@ -2721,6 +2878,60 @@ export default function DashboardKantor() {
 
             <div className="p-4 bg-stone-100 border-t border-stone-200 rounded-b-2xl flex justify-end">
               <button onClick={handleTutupModal} className="bg-white border border-stone-300 hover:bg-stone-50 text-slate-700 font-bold px-5 py-2 rounded-xl text-xs shadow-3xs transition-colors">Tutup Jendela</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL PERMINTAAN PERBAIKAN KONFIRMASI PCL */}
+      {permintaanPerbaikanId && (
+        <div className="fixed inset-0 bg-slate-950/70 z-40 flex items-center justify-center p-4 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white w-full max-w-md rounded-xl border border-rose-200 p-5 shadow-2xl space-y-4 animate-scale-up">
+            <div className="flex items-center gap-2.5 text-rose-700">
+              <span className="text-xl">↩</span>
+              <h4 className="text-xs font-black uppercase tracking-wider text-slate-800">Minta Perbaikan Konfirmasi PCL</h4>
+            </div>
+
+            <div className="space-y-3 text-xs leading-relaxed text-slate-650 font-medium">
+              <p>Data ini akan <strong>muncul kembali di Dashboard Lapangan PCL</strong>. Konfirmasi PCL sebelumnya tetap disimpan agar dapat diperbaiki, bukan dihapus.</p>
+
+              <div className="space-y-1 bg-rose-50 p-3 rounded-lg border border-rose-200">
+                <label className="text-[10px] font-black text-rose-800 block uppercase tracking-wide">
+                  Catatan / Instruksi Perbaikan PCL <span className="text-red-600">*</span>
+                </label>
+                <textarea
+                  rows="4"
+                  value={catatanPegawaiInput}
+                  onChange={(e) => setCatatanPegawaiInput(e.target.value)}
+                  placeholder="Contoh: Mohon jelaskan jumlah AC yang masih aktif dan daya listrik rumah berdasarkan hasil kroscek."
+                  className="w-full bg-white border border-rose-300 rounded-md p-2 text-xs text-slate-800 focus:outline-rose-600 font-sans leading-normal placeholder-stone-400"
+                />
+              </div>
+
+              <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-[11px] text-amber-950">
+                Setelah PCL mengirim ulang, status akan kembali menjadi <strong>Belum Diperiksa</strong> dan data kembali menunggu verifikasi pegawai.
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-stone-100 text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => {
+                  setPermintaanPerbaikanId(null);
+                  setCatatanPegawaiInput('');
+                }}
+                className="bg-stone-100 hover:bg-stone-200 text-slate-700 px-4 py-2 rounded-lg transition-colors border"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={updatingId === permintaanPerbaikanId}
+                onClick={() => handleMintaPerbaikanPcl(permintaanPerbaikanId)}
+                className="bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg shadow-sm transition-colors"
+              >
+                {updatingId === permintaanPerbaikanId ? 'Mengirim...' : '↩ Kirim ke PCL'}
+              </button>
             </div>
           </div>
         </div>

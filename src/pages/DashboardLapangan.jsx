@@ -140,13 +140,23 @@ export default function DashboardLapangan() {
 
       console.log('✅ TOTAL DATA MONITORING LAPANGAN:', semuaRows.length);
 
-      // Workspace Lapangan hanya berisi anomali yang belum dikonfirmasi petugas
-      // dan belum ditindaklanjuti di FASIH.
-      const dbRows = semuaRows.filter(
-        item =>
-          String(item.status_fasih || '').trim() === 'Belum Tindak Lanjut FASIH' &&
-          String(item.status_konfirmasi || '').trim() === 'Belum Tindak Lanjut'
-      );
+      // Workspace Lapangan menampilkan:
+      // 1) anomali yang belum pernah dikonfirmasi PCL; atau
+      // 2) anomali yang secara khusus dikembalikan pegawai untuk diperbaiki.
+      // Data yang sudah selesai FASIH tetap tidak ditampilkan.
+      const dbRows = semuaRows.filter(item => {
+        const statusFasih = String(item.status_fasih || '').trim();
+        const statusKonfirmasi = String(item.status_konfirmasi || '').trim();
+        const statusMonitoring = String(item.status_monitoring || '').trim();
+
+        return (
+          statusFasih === 'Belum Tindak Lanjut FASIH' &&
+          (
+            statusKonfirmasi === 'Belum Tindak Lanjut' ||
+            statusMonitoring === 'Perlu Perbaikan PCL'
+          )
+        );
+      });
 
       setRawMonitoringData(dbRows);
 
@@ -242,7 +252,10 @@ export default function DashboardLapangan() {
           let belumSelesaiUnik = 0;
 
           grupMasalah.forEach(barisTerkait => {
-            if (barisTerkait.some(b => b.status_konfirmasi === 'Belum Tindak Lanjut')) {
+            if (barisTerkait.some(b =>
+              b.status_konfirmasi === 'Belum Tindak Lanjut' ||
+              b.status_monitoring === 'Perlu Perbaikan PCL'
+            )) {
               belumSelesaiUnik++;
             }
           });
@@ -306,7 +319,10 @@ export default function DashboardLapangan() {
 
           let belumSelesaiUnik = 0;
           grupMasalah.forEach(barisTerkait => {
-            if (barisTerkait.some(b => b.status_konfirmasi === 'Belum Tindak Lanjut')) {
+            if (barisTerkait.some(b =>
+              b.status_konfirmasi === 'Belum Tindak Lanjut' ||
+              b.status_monitoring === 'Perlu Perbaikan PCL'
+            )) {
               belumSelesaiUnik++;
             }
           });
@@ -367,6 +383,8 @@ export default function DashboardLapangan() {
           tipe_masalah: item.tipe_masalah || 'ANOMALI',
           status_konfirmasi: item.status_konfirmasi || 'Belum Tindak Lanjut',
           catatan_lapangan: item.catatan_lapangan || '',
+          status_monitoring: item.status_monitoring || 'Belum Diperiksa',
+          catatan_pegawai: item.catatan_pegawai || '',
           snapshots: []
         };
       }
@@ -378,11 +396,19 @@ export default function DashboardLapangan() {
         grupError.snapshots.push({
           anomali_id: item.anomali_id,
           tanggal_snapshot: item.tanggal_snapshot,
-          status_konfirmasi: item.status_konfirmasi || 'Belum Tindak Lanjut'
+          status_konfirmasi: item.status_konfirmasi || 'Belum Tindak Lanjut',
+          catatan_lapangan: item.catatan_lapangan || '',
+          status_monitoring: item.status_monitoring || 'Belum Diperiksa',
+          catatan_pegawai: item.catatan_pegawai || ''
         });
       }
 
-      if (item.status_konfirmasi === 'Belum Tindak Lanjut') {
+      if (item.status_monitoring === 'Perlu Perbaikan PCL') {
+        grupError.status_monitoring = 'Perlu Perbaikan PCL';
+        grupError.catatan_pegawai = item.catatan_pegawai || grupError.catatan_pegawai || '';
+        grupError.status_konfirmasi = item.status_konfirmasi || grupError.status_konfirmasi;
+        grupError.catatan_lapangan = item.catatan_lapangan || grupError.catatan_lapangan || '';
+      } else if (item.status_konfirmasi === 'Belum Tindak Lanjut') {
         grupError.status_konfirmasi = 'Belum Tindak Lanjut';
         grupError.catatan_lapangan = item.catatan_lapangan || grupError.catatan_lapangan || '';
       }
@@ -428,21 +454,30 @@ export default function DashboardLapangan() {
       return;
     }
 
+    const snapshotAcuan = snapshotsTarget[0] || {};
+
     setEditingAnomali({
       ...subAnomali,
       nama_subjek: namaSubjek,
       assignment_id: assignmentId,
       subjek_key: subjekKey,
       snapshot_target: snapshotTarget,
-      snapshots: snapshotsTarget
+      snapshots: snapshotsTarget,
+      status_konfirmasi: snapshotAcuan.status_konfirmasi || subAnomali.status_konfirmasi,
+      catatan_lapangan: snapshotAcuan.catatan_lapangan || subAnomali.catatan_lapangan || '',
+      status_monitoring: snapshotAcuan.status_monitoring || subAnomali.status_monitoring || 'Belum Diperiksa',
+      catatan_pegawai: snapshotAcuan.catatan_pegawai || subAnomali.catatan_pegawai || ''
     });
 
+    const statusAcuan = snapshotAcuan.status_konfirmasi || subAnomali.status_konfirmasi;
     setStatusKonfirmasiForm(
-      subAnomali.status_konfirmasi === 'Belum Tindak Lanjut'
+      statusAcuan === 'Belum Tindak Lanjut'
         ? 'Sesuai Kondisi Lapangan'
-        : subAnomali.status_konfirmasi
+        : statusAcuan
     );
-    setCatatanLapanganForm(subAnomali.catatan_lapangan || '');
+    setCatatanLapanganForm(
+      snapshotAcuan.catatan_lapangan || subAnomali.catatan_lapangan || ''
+    );
   };
 
   // --- SAVE TINDAK LANJUT HANYA UNTUK SUBJEK + KODE + SNAPSHOT AKTIF ---
@@ -478,11 +513,16 @@ export default function DashboardLapangan() {
               status_konfirmasi: statusKonfirmasiForm,
               catatan_lapangan: catatanLapanganForm.trim(),
               dkonfirmasi_oleh_email: profilUser?.email,
-              tanggal_konfirmasi: waktuKonfirmasi
+              tanggal_konfirmasi: waktuKonfirmasi,
+              // Jika ini merupakan pengisian ulang yang diminta pegawai,
+              // kembalikan ke antrean pemeriksaan kantor setelah PCL mengirim ulang.
+              status_monitoring: 'Belum Diperiksa',
+              diperiksa_oleh_email: null,
+              tanggal_periksa: null
             })
             .eq('anomali_id', snap.anomali_id)
             .select(
-              'anomali_id, status_konfirmasi, catatan_lapangan, dkonfirmasi_oleh_email, tanggal_konfirmasi'
+              'anomali_id, status_konfirmasi, catatan_lapangan, dkonfirmasi_oleh_email, tanggal_konfirmasi, status_monitoring'
             )
             .single();
 
@@ -545,7 +585,9 @@ export default function DashboardLapangan() {
       );
 
       alert(
-        `Konfirmasi lapangan berhasil disimpan untuk snapshot ${formatTanggalIndo(editingAnomali.snapshot_target)}.`
+        editingAnomali.status_monitoring === 'Perlu Perbaikan PCL'
+          ? `Perbaikan konfirmasi berhasil dikirim ulang untuk snapshot ${formatTanggalIndo(editingAnomali.snapshot_target)} dan kembali menunggu pemeriksaan pegawai.`
+          : `Konfirmasi lapangan berhasil disimpan untuk snapshot ${formatTanggalIndo(editingAnomali.snapshot_target)}.`
       );
       setEditingAnomali(null);
 
@@ -806,7 +848,6 @@ export default function DashboardLapangan() {
 
                     <div className="p-3 space-y-3 divide-y divide-stone-100">
                       {errorTerfilter.map((err, i) => {
-                        const isBelumTuntas = err.status_konfirmasi === 'Belum Tindak Lanjut';
                         const isUsha = kategoriItem(err) === 'USAHA';
                         const teksKeterangan = getInfoAnomali(err.kode_anomali, 'deskripsi');
                         
@@ -814,10 +855,6 @@ export default function DashboardLapangan() {
                                                String(err.kode_anomali).startsWith('M') || 
                                                teksKeterangan.toLowerCase().includes('kosong') || 
                                                teksKeterangan.toLowerCase().includes('missing');
-
-                        const warnaBarisBg = isBelumTuntas 
-                          ? (isMissingValue ? 'bg-sky-50/70 border-sky-300 ring-1 ring-sky-300/30' : 'bg-red-50/70 border-amber-200/70') 
-                          : 'bg-emerald-50/40 border-emerald-200/50';
 
                         const snapshotDitampilkan = err.snapshots.filter(s => {
                           if (selectedSnapshot === 'terakhir' && availableSnapshots.length > 0) {
@@ -828,6 +865,21 @@ export default function DashboardLapangan() {
                           }
                           return true;
                         });
+
+                        const snapshotAcuan = [...snapshotDitampilkan]
+                          .sort((a, b) => String(b.tanggal_snapshot).localeCompare(String(a.tanggal_snapshot)))[0] || {};
+                        const perluPerbaikanPcl =
+                          snapshotAcuan.status_monitoring === 'Perlu Perbaikan PCL';
+                        const isBelumTuntas =
+                          snapshotAcuan.status_konfirmasi === 'Belum Tindak Lanjut' || perluPerbaikanPcl;
+                        const catatanPegawaiAcuan = snapshotAcuan.catatan_pegawai || err.catatan_pegawai || '';
+                        const catatanLapanganAcuan = snapshotAcuan.catatan_lapangan || err.catatan_lapangan || '';
+
+                        const warnaBarisBg = perluPerbaikanPcl
+                          ? 'bg-rose-50/80 border-rose-300 ring-1 ring-rose-300/30'
+                          : isBelumTuntas
+                            ? (isMissingValue ? 'bg-sky-50/70 border-sky-300 ring-1 ring-sky-300/30' : 'bg-red-50/70 border-amber-200/70')
+                            : 'bg-emerald-50/40 border-emerald-200/50';
 
                         return (
                           <div key={`${ruta.subjek_key}_${err.kode_anomali}`} className={`pt-3 pb-2 px-2.5 rounded-xl border transition-all ${warnaBarisBg} ${i === 0 ? 'mt-0' : 'mt-2'} space-y-2.5`}>
@@ -868,17 +920,31 @@ export default function DashboardLapangan() {
                                 </div>
                               </div>
                               <span className={`text-[9px] font-black px-2 py-0.5 rounded-md shrink-0 uppercase tracking-wide border shadow-3xs ${
-                                isBelumTuntas 
-                                  ? (isMissingValue ? 'bg-sky-100 text-sky-900 border-sky-300' : 'bg-amber-100 text-amber-800 border-amber-300/60') 
-                                  : 'bg-emerald-100 text-emerald-800 border-emerald-300/60'
+                                perluPerbaikanPcl
+                                  ? 'bg-rose-100 text-rose-900 border-rose-300'
+                                  : isBelumTuntas 
+                                    ? (isMissingValue ? 'bg-sky-100 text-sky-900 border-sky-300' : 'bg-amber-100 text-amber-800 border-amber-300/60') 
+                                    : 'bg-emerald-100 text-emerald-800 border-emerald-300/60'
                               }`}>
-                                {isBelumTuntas ? (isMissingValue ? 'Belum Diisi' : 'Belum Tindak Lanjut') : 'Selesai'}
+                                {perluPerbaikanPcl
+                                  ? 'Perlu Perbaikan'
+                                  : isBelumTuntas
+                                    ? (isMissingValue ? 'Belum Diisi' : 'Belum Tindak Lanjut')
+                                    : 'Selesai'}
                               </span>
                             </div>
 
-                            {err.catatan_lapangan && (
+                            {perluPerbaikanPcl && catatanPegawaiAcuan && (
+                              <div className="p-3 bg-rose-100/80 border border-rose-300 rounded-lg text-xs text-rose-950 font-medium leading-relaxed shadow-xs">
+                                <span className="font-black text-rose-800 text-[9px] block mb-1 uppercase tracking-wider">↩ Catatan Perbaikan dari Pegawai:</span>
+                                "{catatanPegawaiAcuan}"
+                              </div>
+                            )}
+
+                            {catatanLapanganAcuan && (
                               <div className="p-2.5 bg-white/80 border border-stone-200 border-dashed rounded-lg text-xs text-slate-600 font-medium leading-relaxed">
-                                <span className="font-bold text-amber-900 text-[9px] block mb-0.5 uppercase tracking-wider">Konfirmasi Terkini Petugas:</span>"{err.catatan_lapangan}"
+                                <span className="font-bold text-amber-900 text-[9px] block mb-0.5 uppercase tracking-wider">{perluPerbaikanPcl ? 'Konfirmasi Sebelumnya:' : 'Konfirmasi Terkini Petugas:'}</span>
+                                "{catatanLapanganAcuan}"
                               </div>
                             )}
 
@@ -886,12 +952,18 @@ export default function DashboardLapangan() {
                               <button 
                                 onClick={() => handleOpenActionModal(err, ruta.nama_subjek, ruta.assignment_id, ruta.subjek_key)} 
                                 className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all shadow-xs ${
-                                  isBelumTuntas 
-                                    ? (isMissingValue ? 'bg-sky-600 hover:bg-sky-700 text-white' : 'bg-amber-600 hover:bg-amber-700 text-white') 
-                                    : 'bg-stone-100 text-stone-600 hover:bg-stone-200 border border-stone-200'
+                                  perluPerbaikanPcl
+                                    ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                                    : isBelumTuntas 
+                                      ? (isMissingValue ? 'bg-sky-600 hover:bg-sky-700 text-white' : 'bg-amber-600 hover:bg-amber-700 text-white') 
+                                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200 border border-stone-200'
                                 }`}
                               >
-                                {isBelumTuntas ? (isMissingValue ? '📝 Isi Data Kosong' : '✍️ Isi Konfirmasi') : '✏️ Perbaiki Konfirmasi'}
+                                {perluPerbaikanPcl
+                                  ? '✏️ Perbaiki Konfirmasi'
+                                  : isBelumTuntas
+                                    ? (isMissingValue ? '📝 Isi Data Kosong' : '✍️ Isi Konfirmasi')
+                                    : '✏️ Perbaiki Konfirmasi'}
                               </button>
                             </div>
                           </div>
@@ -925,6 +997,14 @@ export default function DashboardLapangan() {
             </div>
 
             <div className="space-y-3.5">
+              {editingAnomali.status_monitoring === 'Perlu Perbaikan PCL' && (
+                <div className="bg-rose-50 border border-rose-300 p-3 rounded-xl text-[11px] leading-relaxed text-rose-950 font-medium space-y-1.5">
+                  <div className="font-black uppercase tracking-wide text-rose-800">↩ Diminta Perbaikan oleh Pegawai</div>
+                  <div>{editingAnomali.catatan_pegawai || 'Pegawai meminta konfirmasi ini diperiksa dan diperbaiki kembali.'}</div>
+                  <div className="pt-1 text-rose-800">Perbaiki status atau catatan di bawah, lalu kirim ulang. Konfirmasi sebelumnya sudah dimuat sebagai bahan koreksi.</div>
+                </div>
+              )}
+
               <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-xl text-[11px] leading-relaxed text-amber-950 font-medium">
                 💡 <strong>Snapshot yang dikonfirmasi:</strong> {formatTanggalIndo(editingAnomali.snapshot_target)}. Konfirmasi ini hanya berlaku untuk subjek, kode anomali, dan snapshot tersebut. Riwayat snapshot lain tetap tersimpan.
               </div>
@@ -944,7 +1024,13 @@ export default function DashboardLapangan() {
 
             <div className="flex gap-2.5 pt-2 border-t border-stone-100">
               <button type="button" onClick={() => setEditingAnomali(null)} className="w-1/3 border border-stone-200 rounded-xl py-2 text-xs font-bold text-slate-500 hover:bg-stone-50 transition-colors">Batal</button>
-              <button type="button" disabled={submitting} onClick={handleSaveTindakLanjut} className="w-2/3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl py-2 text-xs font-bold disabled:opacity-50 shadow-xs transition-colors">{submitting ? 'Menyimpan...' : 'Simpan Konfirmasi'}</button>
+              <button type="button" disabled={submitting} onClick={handleSaveTindakLanjut} className="w-2/3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl py-2 text-xs font-bold disabled:opacity-50 shadow-xs transition-colors">
+                {submitting
+                  ? 'Menyimpan...'
+                  : editingAnomali.status_monitoring === 'Perlu Perbaikan PCL'
+                    ? 'Kirim Ulang Perbaikan'
+                    : 'Simpan Konfirmasi'}
+              </button>
             </div>
           </div>
         </div>
