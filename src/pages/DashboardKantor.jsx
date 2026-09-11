@@ -6,6 +6,10 @@ import * as XLSX from 'xlsx';
 
 export default function DashboardKantor() {
   const { profile: profilUser, logout } = useAuth();
+
+  // Seluruh anomali SIMALI Kabupaten Semarang menggunakan satu snapshot bersama.
+  // Requirement proyek: semua anomali digabung pada tanggal 8 September 2026.
+  const SNAPSHOT_UTAMA = '2026-09-08';
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
 
@@ -177,23 +181,18 @@ export default function DashboardKantor() {
   // Satu tabel detail selalu memakai SATU snapshot agar histori tidak tercampur.
   // Jika filter dashboard = "semua", tabel detail tetap memakai snapshot terbaru.
   const fetchDetailStatusFasih = async () => {
-    const snapshotTarget =
-      selectedSnapshot === 'terakhir' || selectedSnapshot === 'semua'
-        ? availableSnapshots[0]
-        : selectedSnapshot;
-
-    if (!snapshotTarget) {
-      setDataFasihDetail([]);
-      return;
-    }
+    // Proyek ini memakai satu snapshot besar pada 8 September 2026.
+    // Hindari ORDER BY banyak kolom + filter berat di PostgreSQL. Ambil data
+    // secara keyset pagination berdasarkan anomali_id lalu filter di browser.
+    const snapshotTarget = SNAPSHOT_UTAMA;
 
     setLoadingFasihDetail(true);
     setErrorFasihDetail('');
 
     try {
       const pageSize = 1000;
-      let from = 0;
-      let semuaBaris = [];
+      let lastId = 0;
+      const semuaBaris = [];
 
       while (true) {
         let query = supabaseData
@@ -216,42 +215,52 @@ export default function DashboardKantor() {
             status_konfirmasi,
             status_fasih,
             link_fasih,
-            tipe_masalah
+            tipe_masalah,
+            status_monitoring,
+            catatan_pegawai
           `)
           .eq('tanggal_snapshot', snapshotTarget)
-          .order('kdkec', { ascending: true })
-          .order('nama_pcl', { ascending: true })
-          .order('nama_subjek', { ascending: true })
-          .order('kode_anomali', { ascending: true })
-          .order('anomali_id', { ascending: true });
+          .order('anomali_id', { ascending: true })
+          .limit(pageSize);
 
-        // Filter dilakukan di database agar tombol "Belum" tidak perlu
-        // menarik ribuan baris yang sudah selesai.
-        if (filterFasihDetail === 'belum') {
-          query = query.or(
-            'status_fasih.is.null,status_fasih.neq."Sudah Tindak Lanjut FASIH"'
-          );
-        } else if (filterFasihDetail === 'sudah') {
-          query = query.eq('status_fasih', 'Sudah Tindak Lanjut FASIH');
+        if (lastId > 0) {
+          query = query.gt('anomali_id', lastId);
         }
 
-        const { data, error } = await query.range(from, from + pageSize - 1);
+        const { data, error } = await query;
         if (error) throw error;
 
         const batch = data || [];
         semuaBaris.push(...batch);
 
         if (batch.length < pageSize) break;
-        from += pageSize;
+        lastId = Number(batch[batch.length - 1].anomali_id || 0);
+        if (!lastId) break;
       }
 
-      // tipe_masalah lama bisa NULL; NULL diperlakukan sebagai ANOMALI
-      // supaya data lama tidak hilang dari hasil query.
-      const sesuaiTab = semuaBaris.filter(
+      let hasil = semuaBaris.filter(
         item => (item.tipe_masalah || 'ANOMALI') === mainMasalahTab
       );
 
-      setDataFasihDetail(sesuaiTab);
+      if (filterFasihDetail === 'belum') {
+        hasil = hasil.filter(
+          item => String(item.status_fasih || '').trim() !== 'Sudah Tindak Lanjut FASIH'
+        );
+      } else if (filterFasihDetail === 'sudah') {
+        hasil = hasil.filter(
+          item => String(item.status_fasih || '').trim() === 'Sudah Tindak Lanjut FASIH'
+        );
+      }
+
+      // Sorting dilakukan di browser agar database tidak perlu mengurutkan
+      // seluruh snapshot berdasarkan banyak kolom sekaligus.
+      hasil.sort((a, b) => {
+        const ka = `${a.kdkec || ''}|${a.nama_pcl || ''}|${a.nama_subjek || ''}|${a.kode_anomali || ''}|${a.anomali_id || 0}`;
+        const kb = `${b.kdkec || ''}|${b.nama_pcl || ''}|${b.nama_subjek || ''}|${b.kode_anomali || ''}|${b.anomali_id || 0}`;
+        return ka.localeCompare(kb, 'id', { numeric: true });
+      });
+
+      setDataFasihDetail(hasil);
       setHalamanFasihDetail(1);
     } catch (err) {
       console.error('Gagal query detail status FASIH:', err);
@@ -266,60 +275,126 @@ export default function DashboardKantor() {
     setLoading(true);
 
     try {
+      // PENTING:
+      // Seluruh data memang sengaja berada pada satu snapshot 2026-09-08.
+      // Karena itu jangan query view_rekap_agregat_kantor yang melakukan
+      // GROUP BY besar di PostgreSQL. Kita ambil view_monitoring_anomali
+      // per 1.000 baris memakai keyset pagination lalu agregasi di browser.
       const pageSize = 1000;
-      let from = 0;
-      let semuaDataView = [];
+      let lastId = 0;
+      const semuaRaw = [];
 
       while (true) {
-        const { data, error } = await supabaseData
-          .from('view_rekap_agregat_kantor')
-          .select('*')
-          .order('tanggal_snapshot', { ascending: false })
-          .order('kdkec', { ascending: true })
-          .order('idsubsls', { ascending: true })
-          .order('pml_email', { ascending: true })
-          .order('kode_anomali', { ascending: true })
-          .order('tipe_masalah', { ascending: true })
-          .range(from, from + pageSize - 1);
+        let query = supabaseData
+          .from('view_monitoring_anomali')
+          .select(`
+            anomali_id,
+            idsubsls,
+            kdkec,
+            nmkec,
+            tanggal_snapshot,
+            nama_pml,
+            pml_email,
+            kode_anomali,
+            tipe_masalah,
+            status_konfirmasi,
+            status_fasih
+          `)
+          .eq('tanggal_snapshot', SNAPSHOT_UTAMA)
+          .order('anomali_id', { ascending: true })
+          .limit(pageSize);
 
+        if (lastId > 0) {
+          query = query.gt('anomali_id', lastId);
+        }
+
+        const { data, error } = await query;
         if (error) throw error;
 
         const batch = data || [];
+        semuaRaw.push(...batch);
 
         console.log(
-          `📦 FETCH VIEW: ${from} - ${from + pageSize - 1} = ${batch.length} row`
+          `📦 FETCH SNAPSHOT ${SNAPSHOT_UTAMA}: +${batch.length} row (total ${semuaRaw.length})`
         );
 
-        semuaDataView = [...semuaDataView, ...batch];
-
         if (batch.length < pageSize) break;
-        from += pageSize;
+        lastId = Number(batch[batch.length - 1].anomali_id || 0);
+        if (!lastId) break;
       }
 
-      console.log('✅ TOTAL ROW VIEW DITERIMA:', semuaDataView.length);
+      console.log('✅ TOTAL RAW SNAPSHOT DITERIMA:', semuaRaw.length);
 
-      const dbRows = semuaDataView;
+      // Bentuk ulang data agar kompatibel dengan struktur lama dari
+      // view_rekap_agregat_kantor. Hasil UI tidak perlu diubah.
+      const rekapMap = new Map();
 
-      const daftarKecDariDB = [
-        ...new Map(
-          dbRows.map(item => [
-            `${item.kdkec}_${item.nmkec}`,
-            { kdkec: item.kdkec, nmkec: item.nmkec }
-          ])
-        ).values()
-      ];
+      semuaRaw.forEach((item) => {
+        const tipeMasalah = item.tipe_masalah || 'ANOMALI';
+        const key = [
+          item.idsubsls || '',
+          item.kdkec || '',
+          item.nmkec || '',
+          SNAPSHOT_UTAMA,
+          item.nama_pml || '',
+          item.pml_email || '',
+          item.kode_anomali || '',
+          tipeMasalah
+        ].join('|||');
 
-      console.log('✅ JUMLAH KEC DARI VIEW:', daftarKecDariDB.length);
-      console.table(daftarKecDariDB);
+        if (!rekapMap.has(key)) {
+          rekapMap.set(key, {
+            idsubsls: item.idsubsls,
+            kdkec: item.kdkec,
+            nmkec: item.nmkec,
+            tanggal_snapshot: SNAPSHOT_UTAMA,
+            nama_pml: item.nama_pml,
+            pml_email: item.pml_email,
+            kode_anomali: item.kode_anomali,
+            tipe_masalah: tipeMasalah,
+            total_rows: 0,
+            sudah_pcl: 0,
+            belum_pcl: 0,
+            sudah_fasih: 0,
+            belum_fasih: 0
+          });
+        }
+
+        const target = rekapMap.get(key);
+        const statusKonfirmasi = String(item.status_konfirmasi || 'Belum Tindak Lanjut').trim();
+        const statusFasih = String(item.status_fasih || 'Belum Tindak Lanjut FASIH').trim();
+
+        target.total_rows += 1;
+
+        if (statusKonfirmasi !== 'Belum Tindak Lanjut') {
+          target.sudah_pcl += 1;
+        } else {
+          target.belum_pcl += 1;
+        }
+
+        if (statusFasih === 'Sudah Tindak Lanjut FASIH') {
+          target.sudah_fasih += 1;
+        }
+
+        // Samakan definisi dengan view_rekap_agregat_kantor lama:
+        // belum FASIH hanya dihitung jika PCL sudah memberi konfirmasi.
+        if (
+          statusFasih !== 'Sudah Tindak Lanjut FASIH' &&
+          statusKonfirmasi !== 'Belum Tindak Lanjut'
+        ) {
+          target.belum_fasih += 1;
+        }
+      });
+
+      const dbRows = Array.from(rekapMap.values());
+
+      console.log('✅ TOTAL ROW REKAP LOKAL:', dbRows.length);
 
       setRawViewData(dbRows);
 
-      const daftarTanggal = [
-        ...new Set(dbRows.map(item => item.tanggal_snapshot))
-      ]
-        .filter(Boolean)
-        .sort((a, b) => b.localeCompare(a));
-
+      // Requirement proyek: semua anomali disatukan pada tanggal 8.
+      // Tidak perlu mencari atau memecah snapshot lain.
+      const daftarTanggal = [SNAPSHOT_UTAMA];
       setAvailableSnapshots(daftarTanggal);
 
       filterDanProsesDataLokal(
@@ -333,7 +408,7 @@ export default function DashboardKantor() {
       console.error('❌ GAGAL FETCH DATA MONITORING KANTOR:', err);
 
       alert(
-        'Gagal mengambil data monitoring: ' +
+        'Gagal mengambil data monitoring snapshot 8 September 2026: ' +
         (err?.message || err)
       );
     } finally {
